@@ -13,6 +13,26 @@ let historialVentas = []; // Almacena el historial de ventas
 let historialCocina = []; // Almacena el historial de órdenes de cocina
 let ultimaFechaContadores = null; // Fecha del último contador
 
+// Abrir modal Bootstrap sin cerrar por clic afuera ni Escape
+function abrirModalEstatico(elementOrId, extraOptions = {}) {
+  const el = typeof elementOrId === 'string'
+    ? document.getElementById(elementOrId)
+    : elementOrId;
+  if (!el) {
+    console.warn('Modal no encontrado:', elementOrId);
+    return null;
+  }
+  const existente = bootstrap.Modal.getInstance(el);
+  if (existente) existente.dispose();
+  const modal = new bootstrap.Modal(el, {
+    backdrop: 'static',
+    keyboard: false,
+    ...extraOptions
+  });
+  modal.show();
+  return modal;
+}
+
 // Memoria de nombres de domiciliarios (autocompletado)
 const STORAGE_DOMICILIARIOS = 'nombresDomiciliarios';
 const MAX_DOMICILIARIOS = 50;
@@ -2936,7 +2956,7 @@ function agregarProducto(id) {
   document.getElementById('cantidadProducto').value = '1';
   document.getElementById('detallesProducto').value = '';
 
-  // Mostrar u ocultar salsas según el producto
+  // Mostrar u ocultar modificaciones según el producto
   const salsasContainer = document.getElementById('salsasProductoContainer');
   const salsasCheckboxes = document.getElementById('salsasProductoCheckboxes');
   if (salsasContainer && salsasCheckboxes) {
@@ -2956,8 +2976,7 @@ function agregarProducto(id) {
   actualizarTotalModal();
   
   // Mostrar el modal
-  const modal = new bootstrap.Modal(document.getElementById('modalCantidad'));
-  modal.show();
+  abrirModalEstatico('modalCantidad');
 }
 
 // Función para cambiar cantidad en el modal
@@ -2990,7 +3009,7 @@ function confirmarAgregarProducto() {
   const salsasChecks = document.querySelectorAll('#salsasProductoCheckboxes input[name="salsaProducto"]:checked');
   const salsasSeleccionadas = Array.from(salsasChecks).map(c => c.value);
   if (salsasSeleccionadas.length) {
-    detalles = (detalles ? detalles + '; ' : '') + 'Salsas: ' + salsasSeleccionadas.join(', ');
+    detalles = (detalles ? detalles + '; ' : '') + 'Modificaciones: ' + salsasSeleccionadas.join(', ');
   }
 
   // ========================================
@@ -3597,8 +3616,7 @@ function mostrarModalCambioMesa() {
   document.getElementById('mesaDestino').value = '';
 
   // Mostrar el modal
-  const modal = new bootstrap.Modal(document.getElementById('modalCambioMesa'));
-  modal.show();
+  abrirModalEstatico('modalCambioMesa');
 
   // Enfocar el campo de mesa destino
   setTimeout(() => {
@@ -3795,38 +3813,176 @@ function ventaRapida() {
 // La función correcta está más adelante en el código
 
 // Función para mostrar recibo de venta rápida
-function mostrarReciboVentaRapida(venta) {
+// ventanaExistente: reutiliza la del ticket de cocina (evita bloqueo de popups)
+function mostrarReciboVentaRapida(venta, ventanaExistente) {
   console.log('🔍 DEBUG RECIBO VENTA RÁPIDA:');
   console.log('   - Venta recibida:', venta);
   console.log('   - Items:', venta.items);
   console.log('   - Cantidad de items:', venta.items ? venta.items.length : 'undefined');
-  
-  const ventanaRecibo = window.open('', '_blank', 'width=400,height=600,scrollbars=yes');
+
+  let ventanaRecibo = null;
+  try {
+    if (ventanaExistente && !ventanaExistente.closed) {
+      ventanaRecibo = ventanaExistente;
+    }
+  } catch (e) {
+    ventanaRecibo = null;
+  }
+
   if (!ventanaRecibo) {
-    alert('No se pudo abrir la ventana de impresión. Por favor, verifique que los bloqueadores de ventanas emergentes estén desactivados.');
+    ventanaRecibo = window.open('', '_blank', 'width=400,height=600,scrollbars=yes');
+  }
+
+  if (!ventanaRecibo) {
+    ofrecerAbrirReciboVentaRapida(venta);
     return;
   }
 
-  // Obtener el logo del negocio si existe
+  const canal = typeof obtenerCanalVentaRapida === 'function' ? obtenerCanalVentaRapida(venta) : (venta.canal || null);
+  const subtotal = venta.subtotal != null
+    ? venta.subtotal
+    : (venta.items || []).reduce((sum, item) => sum + ((item.precio || 0) * (item.cantidad || 0)), 0);
+  const propina = venta.propina || 0;
+  const descuento = venta.descuento || 0;
+  const valorDomicilio = venta.valorDomicilio || 0;
+  const propinaMonto = venta.propinaMonto != null
+    ? venta.propinaMonto
+    : Math.round((subtotal * propina) / 100);
+  const total = venta.total != null ? venta.total : Math.round(subtotal + propinaMonto - descuento + valorDomicilio);
+  const metodoPago = (venta.metodoPago || 'efectivo').toLowerCase();
   const logoNegocio = localStorage.getItem('logoNegocio');
-  
-  // Obtener datos del negocio
-  const datosNegocio = JSON.parse(localStorage.getItem('datosNegocio') || '{}');
-  
+
+  let tipoPedido = '';
+  let infoAdicional = '';
+  let lineaMesa = '';
+
+  if (canal === 'domicilio') {
+    tipoPedido = 'Pedido a Domicilio';
+    if (venta.cliente || venta.direccion || venta.telefono) {
+      infoAdicional = `
+        <div class="border-top">
+          ${venta.cliente ? `<div class="mb-1"><strong>Cliente:</strong> <strong>${venta.cliente}</strong></div>` : ''}
+          ${venta.direccion ? `<div class="mb-1"><strong>Dir:</strong> <strong>${venta.direccion}</strong></div>` : ''}
+          ${venta.telefono ? `<div class="mb-1"><strong>Tel:</strong> <strong>${venta.telefono}</strong></div>` : ''}
+        </div>
+      `;
+    }
+  } else if (canal === 'recoger') {
+    tipoPedido = 'Pedido para Recoger';
+    if (venta.cliente || venta.telefono || venta.horaRecoger) {
+      infoAdicional = `
+        <div class="border-top">
+          ${venta.cliente ? `<div class="mb-1"><strong>Cliente:</strong> <strong>${venta.cliente}</strong></div>` : ''}
+          ${venta.telefono ? `<div class="mb-1"><strong>Tel:</strong> <strong>${venta.telefono || 'No especificado'}</strong></div>` : ''}
+          ${venta.horaRecoger ? `<div class="mb-1"><strong>Hora:</strong> <strong>${venta.horaRecoger}</strong></div>` : ''}
+        </div>
+      `;
+    }
+  } else if (canal === 'mesa' && venta.numeroMesa) {
+    lineaMesa = `<div class="mb-1">Mesa: ${venta.numeroMesa}</div>`;
+  }
+
+  const items = venta.items || [];
+  // Contenido alineado con recibo de venta normal (procesarPago)
+  const contenidoRecibo = `
+    <div class="logo-container">
+      ${logoNegocio ? `<img src="${logoNegocio}" alt="Logo">` : ''}
+    </div>
+
+    <div class="header text-center">
+      <h2 style="margin: 0; font-size: 14px;">RESTAURANTE</h2>
+      ${tipoPedido ? `<div class="mb-1">${tipoPedido}</div>` : ''}
+      <div class="mb-1">${new Date(venta.fecha || Date.now()).toLocaleString()}</div>
+      ${lineaMesa}
+    </div>
+    
+    ${infoAdicional}
+    
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 40%">Producto</th>
+          <th style="width: 15%">Cant</th>
+          <th style="width: 20%">Precio</th>
+          <th style="width: 25%">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${items.length > 0 ? items.map(item => `
+          <tr>
+            <td>${item.nombre || 'Producto'}</td>
+            <td>${item.cantidad || 0}</td>
+            <td style="text-align:right;">${formatearNumero(item.precio || 0)}</td>
+            <td style="text-align:right;">${formatearNumero((item.precio || 0) * (item.cantidad || 0))}</td>
+          </tr>
+        `).join('') : `
+          <tr>
+            <td colspan="4" class="text-center">No hay productos en esta venta</td>
+          </tr>
+        `}
+      </tbody>
+    </table>
+    
+    <div class="border-top">
+      <div class="mb-1">Subtotal: <span class="text-right">$ ${formatearNumero(subtotal)}</span></div>
+      <div class="mb-1">Propina (${propina}%): <span class="text-right">$ ${formatearNumero(propinaMonto)}</span></div>
+      <div class="mb-1">Descuento: <span class="text-right">$ ${formatearNumero(descuento)}</span></div>
+      ${valorDomicilio > 0 ? `<div class="mb-1">Domicilio: <span class="text-right">$ ${formatearNumero(valorDomicilio)}</span></div>${(venta.nombreDomiciliario || '').trim() ? `<div class="mb-1">Domiciliario: ${venta.nombreDomiciliario}</div>` : ''}` : ''}
+      <div class="mb-1 total-row"><strong>Total: $ ${formatearNumero(total)}</strong></div>
+    </div>
+    
+    <div class="border-top">
+      <div class="mb-1">Método de Pago: ${metodoPago}</div>
+      ${metodoPago === 'efectivo' || metodoPago === 'mixto' ? `
+        <div class="mb-1">Recibido en Efectivo: $ ${formatearNumero(venta.montoRecibido || 0)}</div>
+        <div class="mb-1">Cambio: $ ${formatearNumero(venta.cambio || 0)}</div>
+      ` : ''}
+      ${metodoPago === 'transferencia' ? `
+        <div class="mb-1">N° Transferencia: ${venta.numeroTransferencia || 'N/A'}</div>
+        <div class="mb-1">Transferencia: $ ${formatearNumero(venta.montoTransferencia || 0)}</div>
+      ` : ''}
+      ${metodoPago === 'mixto' ? `
+        <div class="mb-1">Monto en Efectivo: $ ${formatearNumero(venta.montoRecibido || 0)}</div>
+        <div class="mb-1">Cambio: $ ${formatearNumero(venta.cambio || 0)}</div>
+        <div class="mb-1">N° Transferencia: ${venta.numeroTransferencia || 'N/A'}</div>
+        <div class="mb-1">Transferencia: $ ${formatearNumero(venta.montoTransferencia || 0)}</div>
+      ` : ''}
+    </div>
+    
+    ${(() => {
+      const datosNegocio = JSON.parse(localStorage.getItem('datosNegocio') || '{}');
+      if (datosNegocio && Object.values(datosNegocio).some(valor => valor)) {
+        return `
+          <div class="border-top mt-1">
+            ${datosNegocio.nombre ? `<div><strong>${datosNegocio.nombre}</strong></div>` : ''}
+            ${datosNegocio.nit ? `<div>NIT/Cédula: ${datosNegocio.nit}</div>` : ''}
+            ${datosNegocio.direccion ? `<div>Dirección: ${datosNegocio.direccion}</div>` : ''}
+            ${datosNegocio.correo ? `<div>Correo: ${datosNegocio.correo}</div>` : ''}
+            ${datosNegocio.telefono ? `<div>Teléfono: ${datosNegocio.telefono}</div>` : ''}
+          </div>
+        `;
+      }
+      return '';
+    })()}
+    
+    <div class="text-center mt-1">
+      <div class="border-top">¡Gracias por su compra!</div>
+      <div class="border-top">ToySoft POS</div>
+    </div>
+  `;
+
   ventanaRecibo.document.open();
   ventanaRecibo.document.write(`
     <!DOCTYPE html>
     <html>
       <head>
-        <title>Recibo - Venta Rápida</title>
+        <title>Recibo de Pago</title>
         <meta charset="UTF-8">
         <style>
           body { 
             font-family: monospace;
-            /* Aumentamos tamaño para que se vea más grande en cocina */
-            font-size: 18px;
-            /* Que use todo el ancho disponible del papel (58mm, 80mm, etc.) */
-            width: 100%;
+            font-size: 14px;
+            width: 57mm;
             margin: 0;
             padding: 1mm;
           }
@@ -3838,12 +3994,12 @@ function mostrarReciboVentaRapida(venta) {
             width: 100%;
             border-collapse: collapse;
             margin: 1mm 0;
-            font-size: 18px;
+            font-size: 14px;
           }
           th, td { 
             padding: 0.5mm;
             text-align: left;
-            font-size: 18px;
+            font-size: 14px;
           }
           .border-top { 
             border-top: 1px dashed #000;
@@ -3858,6 +4014,14 @@ function mostrarReciboVentaRapida(venta) {
           .total-row {
             font-weight: bold;
             font-size: 16px;
+          }
+          .logo-container {
+            text-align: center;
+            margin-bottom: 2mm;
+          }
+          .logo-container img {
+            max-width: 100%;
+            max-height: 120px;
           }
           .botones-impresion {
             position: fixed;
@@ -3881,22 +4045,6 @@ function mostrarReciboVentaRapida(venta) {
           .botones-impresion button:hover {
             background: #0056b3;
           }
-          .logo-container {
-            text-align: center;
-            margin-bottom: 2mm;
-          }
-          .logo-container img {
-            max-width: 100%;
-            max-height: 120px;
-          }
-          .info-negocio {
-            text-align: center;
-            margin-bottom: 2mm;
-            font-size: 12px;
-          }
-          .info-negocio strong {
-            font-size: 14px;
-          }
           @media print {
             .botones-impresion {
               display: none;
@@ -3916,112 +4064,45 @@ function mostrarReciboVentaRapida(venta) {
           <button onclick="window.print()">Imprimir</button>
           <button onclick="window.close()">Cerrar</button>
         </div>
-        
-        <div class="logo-container">
-          ${logoNegocio ? `<img src="${logoNegocio}" alt="Logo">` : ''}
-        </div>
-
-        ${datosNegocio && Object.values(datosNegocio).some(valor => valor) ? `
-        <div class="info-negocio border-top">
-          ${datosNegocio.nombre ? `<div class="mb-1"><strong>${datosNegocio.nombre}</strong></div>` : ''}
-          ${datosNegocio.nit ? `<div class="mb-1">NIT/Cédula: ${datosNegocio.nit}</div>` : ''}
-          ${datosNegocio.direccion ? `<div class="mb-1">${datosNegocio.direccion}</div>` : ''}
-          ${datosNegocio.telefono ? `<div class="mb-1">Tel: ${datosNegocio.telefono}</div>` : ''}
-          ${datosNegocio.correo ? `<div class="mb-1">${datosNegocio.correo}</div>` : ''}
-        </div>
-        ` : ''}
-
-        <div class="header text-center">
-          <div class="mb-1">${new Date(venta.fecha).toLocaleString()}</div>
-          <div class="mb-1"><strong>${(() => {
-            const canal = obtenerCanalVentaRapida(venta);
-            if (canal === 'domicilio') return 'DOMICILIO (Caja rápida)';
-            if (canal === 'recoger') return 'PARA RECOGER (Caja rápida)';
-            if (canal === 'mesa') {
-              return venta.numeroMesa
-                ? `MESA / AQUÍ ${venta.numeroMesa} (Caja rápida)`
-                : 'MESA / AQUÍ (Caja rápida)';
-            }
-            return venta.mesa === 'VENTA DIRECTA' ? 'Venta Directa' : `Mesa: ${venta.mesa}`;
-          })()}</strong></div>
-        </div>
-
-        ${venta.canal === 'domicilio' || (venta.cliente && venta.direccion) ? `
-        <div class="border-top">
-          ${venta.cliente ? `<div class="mb-1">Cliente: ${venta.cliente}</div>` : ''}
-          ${venta.telefono ? `<div class="mb-1">Tel: ${venta.telefono}</div>` : ''}
-          ${venta.direccion ? `<div class="mb-1">Dir: ${venta.direccion}</div>` : ''}
-          ${(venta.nombreDomiciliario || '').trim() ? `<div class="mb-1">Domiciliario: ${venta.nombreDomiciliario}</div>` : ''}
-        </div>
-        ` : ''}
-        ${venta.canal === 'recoger' && (venta.cliente || venta.horaRecoger) ? `
-        <div class="border-top">
-          ${venta.cliente ? `<div class="mb-1">Cliente: ${venta.cliente}</div>` : ''}
-          ${venta.horaRecoger ? `<div class="mb-1">Hora: ${venta.horaRecoger}</div>` : ''}
-        </div>
-        ` : ''}
-        
-        <table>
-          <thead>
-            <tr>
-              <th style="width: 40%">Producto</th>
-              <th style="width: 15%">Cant</th>
-              <th style="width: 20%">Precio</th>
-              <th style="width: 25%">Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${venta.items && venta.items.length > 0 ? venta.items.map(item => `
-              <tr>
-                <td><strong>${item.nombre || 'Producto'}</strong></td>
-                <td>${item.cantidad || 0}</td>
-                <td class="text-right">${formatearNumero(item.precio || 0)}</td>
-                <td class="text-right">${formatearNumero((item.precio || 0) * (item.cantidad || 0))}</td>
-              </tr>
-            `).join('') : `
-              <tr>
-                <td colspan="4" class="text-center">No hay productos en esta venta</td>
-              </tr>
-            `}
-          </tbody>
-        </table>
-        
-        <div class="border-top">
-          <div class="mb-1">Subtotal: <span class="text-right">$ ${formatearNumero(venta.subtotal)}</span></div>
-          <div class="mb-1">Propina (${venta.propina}%): <span class="text-right">$ ${formatearNumero((venta.subtotal * venta.propina) / 100)}</span></div>
-          <div class="mb-1">Descuento: <span class="text-right">$ ${formatearNumero(venta.descuento)}</span></div>
-          ${venta.valorDomicilio > 0 ? `<div class="mb-1">Domicilio: <span class="text-right">$ ${formatearNumero(venta.valorDomicilio)}</span></div>${(venta.nombreDomiciliario || '').trim() ? `<div class="mb-1">Domiciliario: ${venta.nombreDomiciliario}</div>` : ''}` : ''}
-          <div class="mb-1 total-row"><strong>Total: $ ${formatearNumero(venta.total)}</strong></div>
-        </div>
-        
-        <div class="border-top">
-          <div class="mb-1">Método de Pago: ${venta.metodoPago.toUpperCase()}</div>
-          ${venta.metodoPago === 'efectivo' ? `
-            <div class="mb-1">Recibido en Efectivo: $ ${formatearNumero(venta.montoRecibido)}</div>
-            <div class="mb-1">Cambio: $ ${formatearNumero(venta.cambio)}</div>
-          ` : ''}
-          ${venta.metodoPago === 'transferencia' ? `
-            <div class="mb-1">N° Transferencia: ${venta.numeroTransferencia || 'N/A'}</div>
-            <div class="mb-1">Transferencia: $ ${formatearNumero(venta.montoTransferencia || 0)}</div>
-          ` : ''}
-          ${venta.metodoPago === 'mixto' ? `
-            <div class="mb-1">Monto en Efectivo: $ ${formatearNumero(venta.montoRecibido)}</div>
-            <div class="mb-1">Cambio: $ ${formatearNumero(venta.cambio)}</div>
-            <div class="mb-1">N° Transferencia: ${venta.numeroTransferencia || 'N/A'}</div>
-            <div class="mb-1">Transferencia: $ ${formatearNumero(venta.montoTransferencia || 0)}</div>
-          ` : ''}
-        </div>
-        
-        <div class="border-top text-center">
-          <div class="mb-1">¡Gracias por su compra!</div>
-          <div class="mb-1">Productos listos - Venta rápida</div>
-          <div class="mb-1">ToySoft POS</div>
+        <div id="contenido">
+          ${contenidoRecibo}
         </div>
       </body>
     </html>
   `);
   
   ventanaRecibo.document.close();
+  try { ventanaRecibo.focus(); } catch (e) { /* ignore */ }
+}
+
+// Si el navegador bloqueó el popup, deja un botón para abrir el recibo con un clic
+function ofrecerAbrirReciboVentaRapida(venta) {
+  window._ventaReciboPendienteVR = venta;
+  const existente = document.getElementById('alertaReciboPendienteVR');
+  if (existente) existente.remove();
+
+  const alerta = document.createElement('div');
+  alerta.id = 'alertaReciboPendienteVR';
+  alerta.className = 'alert alert-warning alert-dismissible fade show position-fixed';
+  alerta.style.cssText = 'top: 20px; right: 20px; z-index: 10000; max-width: 420px;';
+  alerta.innerHTML = `
+    <strong>Recibo del cliente pendiente</strong>
+    <p class="mb-2 small">El navegador bloqueó la ventana. Haz clic para abrirlo.</p>
+    <button type="button" class="btn btn-sm btn-warning" id="btnAbrirReciboPendienteVR">
+      <i class="fas fa-receipt"></i> Abrir recibo del cliente
+    </button>
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  `;
+  document.body.appendChild(alerta);
+  const btn = document.getElementById('btnAbrirReciboPendienteVR');
+  if (btn) {
+    btn.onclick = function () {
+      const v = window._ventaReciboPendienteVR;
+      if (v) mostrarReciboVentaRapida(v);
+      window._ventaReciboPendienteVR = null;
+      alerta.remove();
+    };
+  }
 }
 
 // Función para mostrar modal de agregar productos venta rápida
@@ -4062,8 +4143,8 @@ function mostrarAyudaVentaRapida(event) {
           <li><strong>Venta Directa:</strong> Agrega productos listos para venta inmediata sin mesa</li>
           <li><strong>Botón "Todos":</strong> Muestra todos los productos disponibles</li>
           <li><strong>Categorías:</strong> Filtra productos por tipo</li>
-          <li><strong>Agregar:</strong> Haz clic en "+ Agregar" para incluir productos</li>
-          <li><strong>Procesar:</strong> Completa la venta y genera el recibo</li>
+          <li><strong>Agregar:</strong> Al elegir producto puedes marcar modificaciones y detalles para cocina</li>
+          <li><strong>Procesar:</strong> Completa la venta; opcional enviar a cocina con esos detalles</li>
         </ul>
         <small class="text-muted">Presiona F1 nuevamente para cerrar esta ayuda</small>
       </div>
@@ -4200,114 +4281,144 @@ function mostrarProductosCategoriaVentaRapida(categoria) {
   });
 }
 
-// Función para agregar producto a venta rápida
+// Función para agregar producto a venta rápida (abre modal cantidad + modificaciones + detalles)
 function agregarProductoVentaRapida(productoId) {
-  console.log('🔍 DEBUG AGREGAR PRODUCTO VENTA RÁPIDA:');
-  console.log('   - Producto ID:', productoId);
-  console.log('   - window.pedidoVentaRapida antes:', window.pedidoVentaRapida);
-  
-  const producto = productos.find(p => p.id === productoId);
-  if (!producto) {
-    console.log('   - Producto no encontrado');
+  if (!window.pedidoVentaRapida) {
+    alert('Error: no hay una venta rápida activa');
     return;
   }
-  
-  console.log('   - Producto encontrado:', producto);
-  
-  // ========================================
-  // VERIFICACIÓN DE DISPONIBILIDAD EN INVENTARIO
-  // ========================================
+
+  const producto = productos.find(p => p.id === productoId);
+  if (!producto) {
+    alert('Producto no encontrado');
+    return;
+  }
+
+  window.productoSeleccionadoVR = producto;
+
+  const img = document.getElementById('productoImagenVR');
+  if (img) {
+    img.src = producto.imagen || 'image/placeholder-product.png';
+    img.alt = producto.nombre;
+  }
+  const nom = document.getElementById('productoNombreVR');
+  if (nom) nom.textContent = producto.nombre;
+  const prec = document.getElementById('productoPrecioVR');
+  if (prec) prec.textContent = formatearPrecio(producto.precio);
+  const cant = document.getElementById('cantidadProductoVR');
+  if (cant) cant.value = '1';
+  const det = document.getElementById('detallesProductoVR');
+  if (det) det.value = '';
+
+  const salsasContainer = document.getElementById('salsasProductoContainerVR');
+  const salsasCheckboxes = document.getElementById('salsasProductoCheckboxesVR');
+  if (salsasContainer && salsasCheckboxes) {
+    if (producto.llevaSalsas && Array.isArray(producto.salsas) && producto.salsas.length > 0) {
+      salsasContainer.style.display = 'block';
+      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      salsasCheckboxes.innerHTML = producto.salsas.map((nombre) =>
+        `<label class="form-check form-check-inline mb-0"><input class="form-check-input" type="checkbox" name="salsaProductoVR" value="${esc(nombre)}"> <span class="form-check-label">${esc(nombre)}</span></label>`
+      ).join('');
+    } else {
+      salsasContainer.style.display = 'none';
+      salsasCheckboxes.innerHTML = '';
+    }
+  }
+
+  actualizarTotalModalVentaRapida();
+
+  const modalEl = document.getElementById('modalCantidadVentaRapida');
+  abrirModalEstatico(modalEl);
+}
+
+function cambiarCantidadModalVentaRapida(cambio) {
+  const input = document.getElementById('cantidadProductoVR');
+  if (!input) return;
+  let cantidad = parseInt(input.value) || 1;
+  cantidad = Math.max(1, Math.min(99, cantidad + cambio));
+  input.value = cantidad;
+  actualizarTotalModalVentaRapida();
+}
+
+function actualizarTotalModalVentaRapida() {
+  const cantidad = parseInt(document.getElementById('cantidadProductoVR')?.value) || 1;
+  const precio = window.productoSeleccionadoVR ? Number(window.productoSeleccionadoVR.precio) : 0;
+  const totalEl = document.getElementById('totalProductoVR');
+  if (totalEl) totalEl.textContent = formatearPrecio(cantidad * precio);
+}
+
+function confirmarAgregarProductoVentaRapida() {
+  if (!window.productoSeleccionadoVR || !window.pedidoVentaRapida) {
+    alert('Error: no hay producto seleccionado');
+    return;
+  }
+
+  const producto = window.productoSeleccionadoVR;
+  const cantidad = Math.max(1, Math.min(99, parseInt(document.getElementById('cantidadProductoVR')?.value) || 1));
+  let detalles = (document.getElementById('detallesProductoVR')?.value || '').trim();
+  const salsasChecks = document.querySelectorAll('#salsasProductoCheckboxesVR input[name="salsaProductoVR"]:checked');
+  const salsasSeleccionadas = Array.from(salsasChecks).map(c => c.value);
+  if (salsasSeleccionadas.length) {
+    detalles = (detalles ? detalles + '; ' : '') + 'Modificaciones: ' + salsasSeleccionadas.join(', ');
+  }
+
+  // Stock
   try {
     if (typeof verificarDisponibilidadProducto === 'function') {
-      // Buscar si ya existe en el pedido para calcular la cantidad total
-      const itemExistente = window.pedidoVentaRapida.items.find(item => item.id === productoId);
-      const cantidadTotal = itemExistente ? itemExistente.cantidad + 1 : 1;
-      
-      const disponibilidad = verificarDisponibilidadProducto(producto.nombre, cantidadTotal);
-      
+      // Sumar cantidad ya en el pedido del mismo producto (cualquier detalle)
+      const yaEnPedido = window.pedidoVentaRapida.items
+        .filter(item => item.id === producto.id)
+        .reduce((sum, item) => sum + (item.cantidad || 0), 0);
+      const disponibilidad = verificarDisponibilidadProducto(producto.nombre, yaEnPedido + cantidad);
+
       if (!disponibilidad.disponible) {
-        const mensaje = `Producto no disponible: ${disponibilidad.mensaje}`;
-        console.warn(mensaje);
-        
-        // Mostrar alerta al usuario
-        const alerta = document.createElement('div');
-        alerta.className = 'alert alert-danger alert-dismissible fade show position-fixed';
-        alerta.style.cssText = 'top: 20px; right: 20px; z-index: 9999; max-width: 400px;';
-        alerta.innerHTML = `
-          <strong>🚫 Producto Sin Stock</strong>
-          <p class="mb-0">${producto.nombre}</p>
-          <p class="mb-0 small">${disponibilidad.mensaje}</p>
-          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        `;
-        
-        document.body.appendChild(alerta);
-        
-        // Auto-remover después de 5 segundos
-        setTimeout(() => {
-          if (alerta.parentNode) {
-            alerta.remove();
-          }
-        }, 5000);
-        
-        return; // No agregar el producto si no está disponible
+        alert(`Producto no disponible: ${disponibilidad.mensaje}`);
+        return;
       }
-      
-      // Mostrar alerta informativa si el stock está en el mínimo (no bloquea la venta)
       if (disponibilidad.stockEnMinimo) {
-        const alertaMinimo = document.createElement('div');
-        alertaMinimo.className = 'alert alert-warning alert-dismissible fade show position-fixed';
-        alertaMinimo.style.cssText = 'top: 20px; right: 20px; z-index: 9999; max-width: 400px;';
-        alertaMinimo.innerHTML = `
-          <strong>⚠️ Stock en Mínimo</strong>
-          <p class="mb-0">${producto.nombre}</p>
-          <p class="mb-0 small">Stock actual: ${disponibilidad.stockActual} ${producto.unidadMedida || ''} (Mínimo: ${disponibilidad.stockMinimo})</p>
-          <p class="mb-0 small text-danger"><strong>¡Se está agotando! Considera reponer.</strong></p>
-          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        `;
-        
-        document.body.appendChild(alertaMinimo);
-        
-        // Auto-remover después de 7 segundos
-        setTimeout(() => {
-          if (alertaMinimo.parentNode) {
-            alertaMinimo.remove();
-          }
-        }, 7000);
+        console.warn(`Stock en mínimo: ${producto.nombre}`);
       }
     }
   } catch (error) {
     console.error('Error al verificar disponibilidad en venta rápida:', error);
-    // Continuar con la venta si hay error en la verificación
   }
-  
-  // Buscar si ya existe en el pedido
-  const itemExistente = window.pedidoVentaRapida.items.find(item => item.id === productoId);
-  
+
+  // Misma línea solo si mismo producto Y mismos detalles
+  const itemExistente = window.pedidoVentaRapida.items.find(
+    item => item.id === producto.id && (item.detalles || '') === detalles
+  );
+
   if (itemExistente) {
-    itemExistente.cantidad += 1;
-    console.log('   - Cantidad incrementada para producto existente');
+    itemExistente.cantidad += cantidad;
   } else {
     window.pedidoVentaRapida.items.push({
       id: producto.id,
       nombre: producto.nombre,
       precio: producto.precio,
-      cantidad: 1,
+      cantidad: cantidad,
+      detalles: detalles || '',
       estado: 'listo'
     });
-    console.log('   - Producto agregado al pedido');
   }
-  
-  console.log('   - window.pedidoVentaRapida después:', window.pedidoVentaRapida);
-  console.log('   - Items después:', window.pedidoVentaRapida.items);
-  
+
   actualizarListaProductosVentaRapida();
   actualizarTotalVentaRapida();
+
+  const modal = bootstrap.Modal.getInstance(document.getElementById('modalCantidadVentaRapida'));
+  if (modal) modal.hide();
+  window.productoSeleccionadoVR = null;
+}
+
+function actualizarDetallesVentaRapida(index, valor) {
+  if (!window.pedidoVentaRapida?.items?.[index]) return;
+  window.pedidoVentaRapida.items[index].detalles = (valor || '').trim();
 }
 
 // Función para actualizar lista de productos en venta rápida
 function actualizarListaProductosVentaRapida() {
   const listaContainer = document.getElementById('listaProductosVentaRapida');
   const contadorContainer = document.getElementById('contadorProductosVentaRapida');
+  if (!listaContainer || !window.pedidoVentaRapida) return;
   const items = window.pedidoVentaRapida.items;
   
   // Actualizar contador de productos
@@ -4326,31 +4437,45 @@ function actualizarListaProductosVentaRapida() {
     `;
     return;
   }
+
+  const esc = (s) => String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
   
   let html = '';
   items.forEach((item, index) => {
     html += `
-      <div class="d-flex justify-content-between align-items-center mb-2 p-2 bg-gradient bg-secondary bg-opacity-10 border border-secondary rounded producto-venta-rapida">
-        <div class="flex-grow-1">
-          <div class="d-flex justify-content-between align-items-start mb-1">
-            <span class="fw-bold text-white nombre-producto">${item.nombre}</span>
-            <span class="badge bg-info fs-6">${item.cantidad}</span>
+      <div class="mb-2 p-2 bg-gradient bg-secondary bg-opacity-10 border border-secondary rounded producto-venta-rapida">
+        <div class="d-flex justify-content-between align-items-start">
+          <div class="flex-grow-1 pe-2">
+            <div class="d-flex justify-content-between align-items-start mb-1">
+              <span class="fw-bold text-white nombre-producto">${esc(item.nombre)}</span>
+              <span class="badge bg-info fs-6">${item.cantidad}</span>
+            </div>
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <small class="text-muted">${formatearPrecio(item.precio)} c/u</small>
+              <span class="fw-bold text-warning precio-producto">${formatearPrecio(item.precio * item.cantidad)}</span>
+            </div>
+            <label class="form-label small text-info mb-0">Detalle cocina</label>
+            <input type="text" class="form-control form-control-sm bg-dark text-white border-secondary"
+                   value="${esc(item.detalles || '')}"
+                   placeholder="Ej: Sin cebolla, poco cocido..."
+                   onchange="actualizarDetallesVentaRapida(${index}, this.value)"
+                   onblur="actualizarDetallesVentaRapida(${index}, this.value)">
           </div>
-          <div class="d-flex justify-content-between align-items-center">
-            <small class="text-muted">${formatearPrecio(item.precio)} c/u</small>
-            <span class="fw-bold text-warning precio-producto">${formatearPrecio(item.precio * item.cantidad)}</span>
+          <div class="d-flex flex-column align-items-center gap-1 ms-1">
+            <button type="button" class="btn btn-outline-warning btn-sm" onclick="cambiarCantidadVentaRapida(${index}, -1)" title="Reducir cantidad">
+              <i class="fas fa-minus"></i>
+            </button>
+            <button type="button" class="btn btn-outline-success btn-sm" onclick="cambiarCantidadVentaRapida(${index}, 1)" title="Aumentar cantidad">
+              <i class="fas fa-plus"></i>
+            </button>
+            <button type="button" class="btn btn-outline-danger btn-sm" onclick="eliminarProductoVentaRapida(${index})" title="Eliminar producto">
+              <i class="fas fa-trash"></i>
+            </button>
           </div>
-        </div>
-        <div class="d-flex align-items-center gap-1 ms-2">
-          <button class="btn btn-outline-warning btn-sm" onclick="cambiarCantidadVentaRapida(${index}, -1)" title="Reducir cantidad">
-            <i class="fas fa-minus"></i>
-          </button>
-          <button class="btn btn-outline-success btn-sm" onclick="cambiarCantidadVentaRapida(${index}, 1)" title="Aumentar cantidad">
-            <i class="fas fa-plus"></i>
-          </button>
-          <button class="btn btn-outline-danger btn-sm" onclick="eliminarProductoVentaRapida(${index})" title="Eliminar producto">
-            <i class="fas fa-trash"></i>
-          </button>
         </div>
       </div>
     `;
@@ -4618,14 +4743,46 @@ function obtenerValorDomicilioVentaRapida() {
   return Math.max(0, parseFloat(document.getElementById('valorDomicilioVentaRapida')?.value) || 0);
 }
 
+function obtenerPropinaVentaRapida() {
+  return Math.max(0, Math.min(100, parseFloat(document.getElementById('propinaVentaRapida')?.value) || 0));
+}
+
+function obtenerDescuentoVentaRapida() {
+  return Math.max(0, parseFloat(document.getElementById('descuentoVentaRapida')?.value) || 0);
+}
+
+function calcularTotalesVentaRapida(subtotal, propinaPct, descuento, valorDomicilio) {
+  const sub = Math.round(Number(subtotal) || 0);
+  const propina = Math.max(0, Math.min(100, Number(propinaPct) || 0));
+  const desc = Math.max(0, Number(descuento) || 0);
+  const dom = Math.max(0, Number(valorDomicilio) || 0);
+  const propinaCalculada = Math.round((sub * propina) / 100);
+  const total = Math.max(0, Math.round(sub + propinaCalculada - desc + dom));
+  return { subtotal: sub, propina, descuento: desc, valorDomicilio: dom, propinaCalculada, total };
+}
+
 function actualizarTotalCanalVentaRapida() {
   if (!window.datosVentaRapida) return;
   const subtotal = window.datosVentaRapida.subtotal || 0;
+  const propina = obtenerPropinaVentaRapida();
+  const descuento = obtenerDescuentoVentaRapida();
   const valorDomicilio = obtenerValorDomicilioVentaRapida();
-  const total = Math.round(subtotal + valorDomicilio);
-  window.datosVentaRapida.valorDomicilio = valorDomicilio;
-  window.datosVentaRapida.total = total;
-  actualizarResumenVentaRapidaUI(subtotal, 0, 0, valorDomicilio, 0, total);
+  const calc = calcularTotalesVentaRapida(subtotal, propina, descuento, valorDomicilio);
+
+  window.datosVentaRapida.propina = calc.propina;
+  window.datosVentaRapida.descuento = calc.descuento;
+  window.datosVentaRapida.valorDomicilio = calc.valorDomicilio;
+  window.datosVentaRapida.propinaCalculada = calc.propinaCalculada;
+  window.datosVentaRapida.total = calc.total;
+
+  actualizarResumenVentaRapidaUI(
+    calc.subtotal,
+    calc.propina,
+    calc.descuento,
+    calc.valorDomicilio,
+    calc.propinaCalculada,
+    calc.total
+  );
   calcularCambioVentaRapida();
 }
 
@@ -4758,6 +4915,10 @@ function mostrarModalVentaRapida(pedido, total, subtotal, propina, descuento, va
   }
   const enviarCocinaEl = document.getElementById('enviarCocinaVentaRapida');
   if (enviarCocinaEl) enviarCocinaEl.checked = false;
+  const propinaEl = document.getElementById('propinaVentaRapida');
+  if (propinaEl) propinaEl.value = propina > 0 ? propina : '';
+  const descuentoEl = document.getElementById('descuentoVentaRapida');
+  if (descuentoEl) descuentoEl.value = descuento > 0 ? descuento : '';
   cambiarCanalVentaRapida();
   actualizarDatalistDomiciliarios();
 
@@ -4778,6 +4939,8 @@ function mostrarModalVentaRapida(pedido, total, subtotal, propina, descuento, va
     valorDomicilio: valorDomicilio || 0,
     propinaCalculada: propinaCalculada || 0
   };
+
+  actualizarTotalCanalVentaRapida();
   
   // Mostrar modal (no se cierra con clic afuera ni Escape)
   const modalEl = document.getElementById('modalVentaRapida');
@@ -4818,9 +4981,18 @@ function confirmarVentaRapida() {
   const metodoPago = document.getElementById('metodoPagoVentaRapida').value;
   const montoRecibido = parseFloat(document.getElementById('montoRecibidoVentaRapida').value) || 0;
   const subtotal = window.datosVentaRapida.subtotal || 0;
-  const total = Math.round(subtotal + (datosCanal.valorDomicilio || 0));
+  const calc = calcularTotalesVentaRapida(
+    subtotal,
+    obtenerPropinaVentaRapida(),
+    obtenerDescuentoVentaRapida(),
+    datosCanal.valorDomicilio || 0
+  );
+  const total = calc.total;
+  window.datosVentaRapida.propina = calc.propina;
+  window.datosVentaRapida.descuento = calc.descuento;
+  window.datosVentaRapida.propinaCalculada = calc.propinaCalculada;
   window.datosVentaRapida.total = total;
-  window.datosVentaRapida.valorDomicilio = datosCanal.valorDomicilio || 0;
+  window.datosVentaRapida.valorDomicilio = calc.valorDomicilio;
   window.datosVentaRapida.canalDatos = datosCanal;
   
   // Validar monto recibido si es efectivo
@@ -4932,7 +5104,10 @@ function procesarVentaRapida(pedido, total, metodoPago = 'efectivo', montoRecibi
 
   // Enviar a cocina si se marcó la opción
   if (venta.enviadoACocina) {
-    enviarVentaRapidaACocina(venta);
+    // Primero ticket de cocina; al continuar se reutiliza la misma ventana para el recibo
+    enviarVentaRapidaACocina(venta, (ventanaCocina) => {
+      mostrarReciboVentaRapida(venta, ventanaCocina);
+    });
   }
 
   // Actualizar inventario si está disponible
@@ -4980,8 +5155,10 @@ function procesarVentaRapida(pedido, total, metodoPago = 'efectivo', montoRecibi
   // Limpiar pedido de venta rápida
   window.pedidoVentaRapida = null;
 
-  // Mostrar recibo
-  mostrarReciboVentaRapida(venta);
+  // Sin cocina: abrir recibo del cliente de inmediato
+  if (!venta.enviadoACocina) {
+    mostrarReciboVentaRapida(venta);
+  }
 
   // Mostrar confirmación
   mostrarConfirmacionVentaRapida(venta);
@@ -5007,7 +5184,7 @@ function mostrarConfirmacionVentaRapida(venta) {
     <p class="mb-0">${etiquetaCanal}</p>
     <p class="mb-0">Total: ${formatearPrecio(venta.total)}</p>
     <p class="mb-0">Método: ${venta.metodoPago.toUpperCase()}</p>
-    <p class="mb-0 small">${venta.enviadoACocina ? 'Enviado a cocina + recibo' : 'Productos listos - sin cocina'}</p>
+    <p class="mb-0 small">${venta.enviadoACocina ? 'Cocina lista · pulsa Continuar al recibo' : 'Productos listos - sin cocina'}</p>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
   `;
   
@@ -5027,14 +5204,31 @@ function mostrarConfirmacionVentaRapida(venta) {
 }
 
 // Enviar venta rápida a historial de cocina + imprimir ticket
-function enviarVentaRapidaACocina(venta) {
+// alCerrarTicket: se llama al cerrar el ticket de cocina (p. ej. abrir recibo del cliente)
+function enviarVentaRapidaACocina(venta, alCerrarTicket) {
+  const dispararAlCerrar = (() => {
+    let usado = false;
+    return (ventanaCocina) => {
+      if (usado || typeof alCerrarTicket !== 'function') return;
+      usado = true;
+      try {
+        alCerrarTicket(ventanaCocina || null);
+      } catch (e) {
+        console.error('Error al abrir recibo tras cerrar cocina:', e);
+      }
+    };
+  })();
+
   try {
     const itemsCocina = (venta.items || []).map(item => ({
       ...item,
       estado: 'en_cocina'
     }));
 
-    if (itemsCocina.length === 0) return;
+    if (itemsCocina.length === 0) {
+      dispararAlCerrar();
+      return;
+    }
 
     const ordenCocina = {
       id: venta.id,
@@ -5069,6 +5263,7 @@ function enviarVentaRapidaACocina(venta) {
 
     imprimirTicketCocina(venta.mesa, itemsCocina, {
       esVentaRapida: true,
+      alCerrar: dispararAlCerrar,
       pedido: {
         cliente: venta.cliente,
         telefono: venta.telefono,
@@ -5090,6 +5285,7 @@ function enviarVentaRapidaACocina(venta) {
   } catch (error) {
     console.error('Error al enviar venta rápida a cocina:', error);
     alert('La venta se guardó, pero hubo un problema al enviar a cocina. Revisa la pantalla de cocina.');
+    dispararAlCerrar();
   }
 }
 
@@ -5345,11 +5541,76 @@ function mostrarVistaPreviaPedido() {
   }, 100);
 }
 
+// Ejecutar callback al cerrar / continuar desde una ventana de impresión
+// opciones: { etiquetaBotonCerrar, reutilizarVentana }
+function enCerrarVentanaImpresion(ventana, alCerrar, opciones = {}) {
+  if (!ventana || typeof alCerrar !== 'function') return;
+
+  const opts = (typeof opciones === 'string')
+    ? { etiquetaBotonCerrar: opciones, reutilizarVentana: false }
+    : (opciones || {});
+  const reutilizar = !!opts.reutilizarVentana;
+
+  let usado = false;
+  let watch = null;
+  const disparar = (ventanaParaRecibo) => {
+    if (usado) return;
+    usado = true;
+    if (watch) clearInterval(watch);
+    try {
+      alCerrar(ventanaParaRecibo || null);
+    } catch (e) {
+      console.error('Error en callback al cerrar impresión:', e);
+    }
+  };
+
+  try {
+    const btn = ventana.document.getElementById('btnCerrarImpresion');
+    if (btn) {
+      if (opts.etiquetaBotonCerrar) btn.textContent = opts.etiquetaBotonCerrar;
+      btn.onclick = function () {
+        if (reutilizar) {
+          // Misma ventana → recibo del cliente (sin segundo popup)
+          disparar(ventana);
+        } else {
+          disparar(null);
+          try { ventana.close(); } catch (e) { /* ignore */ }
+        }
+      };
+    }
+  } catch (e) {
+    console.warn('No se pudo enlazar botón cerrar de impresión:', e);
+  }
+
+  watch = setInterval(() => {
+    try {
+      if (ventana.closed) {
+        clearInterval(watch);
+        // Ventana ya cerrada: no se puede reutilizar
+        disparar(null);
+      }
+    } catch (e) {
+      clearInterval(watch);
+      disparar(null);
+    }
+  }, 400);
+}
+
 // Función para imprimir ticket de cocina
 function imprimirTicketCocina(mesa, productos, opciones = {}) {
-  const ventana = obtenerVentanaImpresion();
+  const alCerrar = typeof opciones.alCerrar === 'function' ? opciones.alCerrar : null;
+  // Ventana propia (no reutilizar ImpresionBalance del cierre) para evitar conflictos
+  let ventana = null;
+  try {
+    ventana = window.open('', '_blank', 'width=400,height=600,scrollbars=yes');
+  } catch (e) {
+    ventana = null;
+  }
   if (!ventana) {
     alert('No se pudo abrir la ventana de impresión. Por favor, verifique que los bloqueadores de ventanas emergentes estén desactivados.');
+    if (alCerrar) {
+      try { alCerrar(null); } catch (e) { /* ignore */ }
+    }
     return;
   }
   
@@ -5377,89 +5638,128 @@ function imprimirTicketCocina(mesa, productos, opciones = {}) {
   let infoCliente = '';
   
   if (pedidoCompleto && pedidoCompleto.cliente) {
-    const esDom = mesa.startsWith('DOM-') || (pedidoCompleto.canal === 'domicilio') || (esVentaRapida && pedidoCompleto.direccion);
-    const esRec = mesa.startsWith('REC-') || (pedidoCompleto.canal === 'recoger');
-    infoCliente = `
-      <div class="cliente-info">
-        <div class="cliente-label">Cliente:</div>
-        <div class="cliente-datos">
-          <strong>${pedidoCompleto.cliente}</strong><br>
-          Tel: ${pedidoCompleto.telefono || 'No disponible'}<br>
-          ${esDom
-            ? `Dir: ${pedidoCompleto.direccion || 'No disponible'}`
-            : (esRec ? `Hora: ${pedidoCompleto.horaRecoger || 'No disponible'}` : '')
-          }
+    const esDom = String(mesa || '').startsWith('DOM-') || (pedidoCompleto.canal === 'domicilio') || (esVentaRapida && pedidoCompleto.direccion);
+    const esRec = String(mesa || '').startsWith('REC-') || (pedidoCompleto.canal === 'recoger');
+    if (esVentaRapida) {
+      infoCliente = `
+        <div class="vr-cliente">
+          <div class="vr-cliente-titulo">CLIENTE</div>
+          <div class="vr-cliente-nombre">${pedidoCompleto.cliente}</div>
+          ${pedidoCompleto.telefono ? `<div>Tel: ${pedidoCompleto.telefono}</div>` : ''}
+          ${esDom && pedidoCompleto.direccion ? `<div>Dir: ${pedidoCompleto.direccion}</div>` : ''}
+          ${esRec && pedidoCompleto.horaRecoger ? `<div>Hora: ${pedidoCompleto.horaRecoger}</div>` : ''}
         </div>
-      </div>
-    `;
+      `;
+    } else {
+      infoCliente = `
+        <div class="cliente-info">
+          <div class="cliente-label">Cliente:</div>
+          <div class="cliente-datos">
+            <strong>${pedidoCompleto.cliente}</strong><br>
+            Tel: ${pedidoCompleto.telefono || 'No disponible'}<br>
+            ${esDom
+              ? `Dir: ${pedidoCompleto.direccion || 'No disponible'}`
+              : (esRec ? `Hora: ${pedidoCompleto.horaRecoger || 'No disponible'}` : '')
+            }
+          </div>
+        </div>
+      `;
+    }
   }
 
   // Información de cambio de mesa si existe
   let infoCambioMesa = '';
   if (pedidoCompleto && pedidoCompleto.cambioMesa) {
     infoCambioMesa = `
-      <div class="cambio-mesa-info" style="border: 2px solid #ff6b00; padding: 2mm; margin: 1mm 0; background: #fff3e0; text-align: center;">
-        <div style="font-weight: bold; font-size: 16px; color: #ff6b00; margin-bottom: 1mm;">
-          ⚠️ CAMBIO DE MESA
+      <div class="cambio-mesa-info" style="border: 2px solid #000; padding: 2mm; margin: 1mm 0; text-align: center;">
+        <div style="font-weight: bold; font-size: 16px; margin-bottom: 1mm;">
+          CAMBIO DE MESA
         </div>
         <div style="font-size: 14px;">
           Mesa ${pedidoCompleto.cambioMesa.origen} → Mesa ${pedidoCompleto.cambioMesa.destino}
         </div>
-        <div style="font-size: 12px; color: #666; margin-top: 1mm;">
+        <div style="font-size: 12px; margin-top: 1mm;">
           ${pedidoCompleto.cambioMesa.fecha}
         </div>
       </div>
     `;
   }
 
-  const bannerVentaRapida = esVentaRapida ? `
-      <div style="border: 2px solid #000; padding: 2mm; margin: 1mm 0; text-align: center; font-weight: bold;">
-        <div style="font-size: 18px;">⚡ VENTA RÁPIDA</div>
-        ${etiquetaCanalVR ? `<div style="font-size: 14px; margin-top: 1mm;">${etiquetaCanalVR}</div>` : ''}
-      </div>
-    ` : '';
-  
-  const contenido = `
-    <div class="header text-center">
-      <h2 style="margin: 0; font-size: 28px; font-weight: bold;">COCINA</h2>
-      ${bannerVentaRapida}
-      <div class="mb-1" style="font-size: 22px; font-weight: bold;">${esVentaRapida ? `Ref: ${mesa}` : `Mesa: ${mesa}`}</div>
-      <div class="mb-1" style="font-size: 20px; font-weight: bold;">Ronda: ${pedidoCompleto && pedidoCompleto.ronda ? pedidoCompleto.ronda : 1}</div>
-      <div class="mb-1">${new Date().toLocaleString()}</div>
-    </div>
-    
-    ${infoCambioMesa}
-    
-    ${infoCliente}
-    
-    <table>
-      <thead>
-        <tr>
-          <th style="width: 20%">Cant</th>
-          <th>Producto</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${productos.map(item => `
-          <tr>
-            <td>${item.cantidad}</td>
-            <td>
-              <div class="producto" style="font-weight: bold; font-size: 16px;">${item.nombre}</div>
-              ${item.detalles ? `
-                <div class="detalles">
-                  <span class="detalle-label">Detalle:</span> ${item.detalles}
-                </div>
-              ` : ''}
-            </td>
-          </tr>
+  const totalItems = (productos || []).reduce((s, p) => s + (parseInt(p.cantidad, 10) || 0), 0);
+  const fechaTicket = new Date().toLocaleString();
+
+  let contenido = '';
+  if (esVentaRapida) {
+    contenido = `
+      <div class="vr-ticket">
+        <div class="vr-banda">COCINA</div>
+        <div class="vr-subbanda">VENTA RAPIDA</div>
+        <div class="vr-canal">${etiquetaCanalVR || 'DIRECTA'}</div>
+        <div class="vr-meta">
+          <div>${fechaTicket}</div>
+          <div>Items: ${totalItems}</div>
+        </div>
+
+        ${infoCliente}
+
+        <div class="vr-sep"></div>
+        <div class="vr-lista-titulo">PEDIDO</div>
+
+        ${(productos || []).map(item => `
+          <div class="vr-item">
+            <div class="vr-cant">${item.cantidad}x</div>
+            <div class="vr-prod">
+              <div class="vr-nombre">${item.nombre}</div>
+              ${item.detalles ? `<div class="vr-detalle">* ${item.detalles}</div>` : ''}
+            </div>
+          </div>
         `).join('')}
-      </tbody>
-    </table>
-    
-    <div class="text-center mt-1">
-      <div class="border-top">${esVentaRapida ? 'Pedido por VENTA RÁPIDA' : '¡Gracias!'}</div>
-    </div>
-  `;
+
+        <div class="vr-sep"></div>
+        <div class="vr-footer">PREPARAR · VENTA RAPIDA</div>
+      </div>
+    `;
+  } else {
+    contenido = `
+      <div class="header text-center">
+        <h2 style="margin: 0; font-size: 28px; font-weight: bold;">COCINA</h2>
+        <div class="mb-1" style="font-size: 22px; font-weight: bold;">Mesa: ${mesa}</div>
+        <div class="mb-1" style="font-size: 20px; font-weight: bold;">Ronda: ${pedidoCompleto && pedidoCompleto.ronda ? pedidoCompleto.ronda : 1}</div>
+        <div class="mb-1">${fechaTicket}</div>
+      </div>
+      
+      ${infoCambioMesa}
+      ${infoCliente}
+      
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 20%">Cant</th>
+            <th>Producto</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${(productos || []).map(item => `
+            <tr>
+              <td style="font-size: 20px; font-weight: bold;">${item.cantidad}</td>
+              <td>
+                <div class="producto" style="font-weight: bold; font-size: 16px;">${item.nombre}</div>
+                ${item.detalles ? `
+                  <div class="detalles">
+                    <span class="detalle-label">Detalle:</span> ${item.detalles}
+                  </div>
+                ` : ''}
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      
+      <div class="text-center mt-1">
+        <div class="border-top">¡Gracias!</div>
+      </div>
+    `;
+  }
   
   // Escribir el contenido completo en la ventana
   ventana.document.write(`
@@ -5489,6 +5789,7 @@ function imprimirTicketCocina(mesa, productos, opciones = {}) {
             padding: 0.5mm;
             text-align: left;
             font-size: 14px;
+            vertical-align: top;
           }
           .border-top { 
             border-top: 1px dashed #000;
@@ -5504,7 +5805,6 @@ function imprimirTicketCocina(mesa, productos, opciones = {}) {
             border: 1px solid #000;
             padding: 1mm;
             margin: 1mm 0;
-            background: #f9f9f9;
           }
           .cliente-label {
             font-weight: bold;
@@ -5512,7 +5812,103 @@ function imprimirTicketCocina(mesa, productos, opciones = {}) {
           }
           .detalle-label {
             font-weight: bold;
-            color: #666;
+          }
+          /* ===== Ticket Venta Rápida ===== */
+          .vr-ticket { width: 100%; }
+          .vr-banda {
+            text-align: center;
+            font-size: 26px;
+            font-weight: 900;
+            letter-spacing: 2px;
+            border: 2px solid #000;
+            padding: 2mm 1mm;
+            margin-bottom: 1mm;
+          }
+          .vr-subbanda {
+            text-align: center;
+            font-size: 14px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            background: #000;
+            color: #fff;
+            padding: 1.5mm 1mm;
+            margin-bottom: 1.5mm;
+          }
+          .vr-canal {
+            text-align: center;
+            font-size: 18px;
+            font-weight: 900;
+            border: 2px dashed #000;
+            padding: 2mm 1mm;
+            margin-bottom: 2mm;
+          }
+          .vr-meta {
+            text-align: center;
+            font-size: 12px;
+            margin-bottom: 2mm;
+            line-height: 1.35;
+          }
+          .vr-cliente {
+            border: 1.5px solid #000;
+            padding: 2mm;
+            margin-bottom: 2mm;
+          }
+          .vr-cliente-titulo {
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            margin-bottom: 1mm;
+            border-bottom: 1px solid #000;
+            padding-bottom: 0.5mm;
+          }
+          .vr-cliente-nombre {
+            font-size: 15px;
+            font-weight: 800;
+            margin-bottom: 0.5mm;
+          }
+          .vr-sep {
+            border-top: 2px dashed #000;
+            margin: 2mm 0;
+          }
+          .vr-lista-titulo {
+            text-align: center;
+            font-size: 12px;
+            font-weight: 800;
+            letter-spacing: 2px;
+            margin-bottom: 1.5mm;
+          }
+          .vr-item {
+            display: flex;
+            gap: 2mm;
+            align-items: flex-start;
+            padding: 1.5mm 0;
+            border-bottom: 1px dotted #000;
+          }
+          .vr-cant {
+            min-width: 12mm;
+            font-size: 22px;
+            font-weight: 900;
+            line-height: 1;
+          }
+          .vr-prod { flex: 1; }
+          .vr-nombre {
+            font-size: 16px;
+            font-weight: 800;
+            line-height: 1.2;
+          }
+          .vr-detalle {
+            font-size: 13px;
+            margin-top: 1mm;
+            font-weight: 700;
+          }
+          .vr-footer {
+            text-align: center;
+            font-size: 12px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            border: 1.5px solid #000;
+            padding: 2mm 1mm;
+            margin-top: 1mm;
           }
           .botones-impresion {
             position: fixed;
@@ -5540,8 +5936,13 @@ function imprimirTicketCocina(mesa, productos, opciones = {}) {
             .botones-impresion {
               display: none;
             }
+            .vr-subbanda {
+              background: #000 !important;
+              color: #fff !important;
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+            }
             @page {
-              /* Sin forzar tamaño: que el driver use el ancho real del papel */
               margin: 0;
             }
             body {
@@ -5553,7 +5954,7 @@ function imprimirTicketCocina(mesa, productos, opciones = {}) {
       <body>
         <div class="botones-impresion">
           <button onclick="window.print()">Imprimir</button>
-          <button onclick="window.close()">Cerrar</button>
+          <button id="btnCerrarImpresion" type="button">Cerrar</button>
         </div>
         <div id="contenido">
           ${contenido}
@@ -5565,6 +5966,18 @@ function imprimirTicketCocina(mesa, productos, opciones = {}) {
   // Cerrar el documento y enfocar la ventana
   ventana.document.close();
   ventana.focus();
+
+  if (alCerrar) {
+    enCerrarVentanaImpresion(ventana, alCerrar, {
+      etiquetaBotonCerrar: esVentaRapida ? 'Continuar al recibo' : 'Cerrar',
+      reutilizarVentana: !!esVentaRapida
+    });
+  } else {
+    try {
+      const btn = ventana.document.getElementById('btnCerrarImpresion');
+      if (btn) btn.onclick = function () { try { ventana.close(); } catch (e) { /* ignore */ } };
+    } catch (e) { /* ignore */ }
+  }
 }
 
 // Función para mostrar el modal de pago
@@ -5646,8 +6059,7 @@ function mostrarModalPago() {
     `;
     
     // Mostrar el modal después de imprimir el recibo preliminar
-    const modal = new bootstrap.Modal(document.getElementById('modalPago'));
-    modal.show();
+    abrirModalEstatico('modalPago');
 
     // Asegurarse de que el event listener no se duplique en montoRecibido
     const montoRecibidoInput = document.getElementById('montoRecibido');
@@ -5850,9 +6262,8 @@ function toggleMetodoPago() {
 // Función para mostrar el modal de cliente
 function mostrarModalCliente(tipo) {
   tipoPedidoActual = tipo;
-  const modal = new bootstrap.Modal(document.getElementById('modalCliente'));
+  abrirModalEstatico('modalCliente');
   actualizarListaClientes();
-  modal.show();
 }
 
 // Función para mostrar el formulario de nuevo cliente
@@ -6788,9 +7199,8 @@ function mostrarModalCierreDiario() {
         // Debug de ventas conflictivas
         debugVentasConflictivas();
         
-        // Mostrar el modal
-        const modal = new bootstrap.Modal(document.getElementById('modalCierreDiario'));
-        modal.show();
+        // Mostrar el modal (no se cierra con clic afuera / Escape)
+        abrirModalEstatico('modalCierreDiario');
         
         console.log('✅ Modal de cierre mostrado correctamente');
         console.log(`💰 Total Ventas: $${totalVentas.toLocaleString()}`);
@@ -8680,8 +9090,7 @@ console.log('[BALANCE] Fuente de gastos: historialGastos', gastos);
 }
 
 function mostrarModalGastos() {
-    const modalGastos = new bootstrap.Modal(document.getElementById('modalGastos'));
-    modalGastos.show();
+    abrirModalEstatico('modalGastos');
     mostrarGastos();
 }
 
@@ -9439,8 +9848,7 @@ function cargarContadores() {
 function mostrarModalCotizaciones() {
   try {
     actualizarTablaCotizaciones();
-    const modal = new bootstrap.Modal(document.getElementById('modalCotizaciones'));
-    modal.show();
+    abrirModalEstatico('modalCotizaciones');
   } catch (error) {
     console.error('Error al mostrar las cotizaciones:', error);
     alert('Error al mostrar las cotizaciones');
@@ -10835,7 +11243,6 @@ guardarCotizacion = function() {
 // Función para mostrar el modal de balance
 function mostrarModalBalance() {
   try {
-    const modal = new bootstrap.Modal(document.getElementById('modalBalance'));
     const fechaBalanceEl = document.getElementById('fechaBalance');
     if (fechaBalanceEl) {
       const hoy = new Date();
@@ -10844,8 +11251,9 @@ function mostrarModalBalance() {
       const d = String(hoy.getDate()).padStart(2, '0');
       fechaBalanceEl.value = `${y}-${m}-${d}`;
     }
+    // abrirModalEstatico ya hace .show(); no llamar modal.show() aparte
+    abrirModalEstatico('modalBalance');
     generarBalance();
-    modal.show();
   } catch (error) {
     console.error('Error al mostrar modal de balance:', error);
     alert('Error al mostrar el balance');
@@ -11507,8 +11915,7 @@ function mostrarModalNuevoCliente() {
 
     // Mostrar el modal de nuevo cliente
     const modalNuevoCliente = document.getElementById('modalNuevoCliente');
-    const bsModalNuevoCliente = new bootstrap.Modal(modalNuevoCliente);
-    bsModalNuevoCliente.show();
+    abrirModalEstatico(modalNuevoCliente);
 
     // Solo agregar el listener una vez
     if (!modalNuevoCliente.dataset.listenerAgregado) {
@@ -11731,7 +12138,6 @@ function mostrarModalNuevaCotizacion() {
 // Función para mostrar el modal de PIN
 function mostrarModalPin(accion) {
   accionPendiente = accion;
-  const modal = new bootstrap.Modal(document.getElementById('modalPinAcceso'));
   document.getElementById('pinAcceso').value = '';
   document.getElementById('mensajeErrorPin').style.display = 'none';
   
@@ -11750,8 +12156,9 @@ function mostrarModalPin(accion) {
       tituloModal.textContent = 'Acceso Restringido';
     }
   }
-  
-  modal.show();
+
+  // abrirModalEstatico ya hace .show()
+  abrirModalEstatico('modalPinAcceso');
 }
 
 // Función para verificar el PIN y determinar el rol
