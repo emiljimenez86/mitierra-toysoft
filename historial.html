@@ -370,10 +370,10 @@
         
         // Información adicional según el tipo
         let infoAdicional = '';
-        if (venta.tipo === 'domicilio') {
+        if (venta.tipo === 'domicilio' || venta.canal === 'domicilio') {
             infoAdicional = `
                 <div class="border-top">
-                    <div class="mb-1"><strong>DOMICILIO</strong></div>
+                    <div class="mb-1"><strong>DOMICILIO${venta.origen === 'caja_rapida' || venta.tipo === 'venta_rapida' ? ' (CAJA RÁPIDA)' : ''}</strong></div>
                     <div class="mb-1">Cliente: ${venta.cliente || 'N/A'}</div>
                     <div class="mb-1">Teléfono: ${venta.telefono || 'N/A'}</div>
                     <div class="mb-1">Dirección: ${venta.direccion || 'N/A'}</div>
@@ -381,23 +381,41 @@
                     ${venta.horaRecoger ? `<div class="mb-1">Hora de recoger: ${venta.horaRecoger}</div>` : ''}
                 </div>
             `;
-        } else if (venta.tipo === 'recoger') {
+        } else if (venta.tipo === 'recoger' || venta.canal === 'recoger') {
             infoAdicional = `
                 <div class="border-top">
-                    <div class="mb-1"><strong>PARA RECOGER</strong></div>
+                    <div class="mb-1"><strong>PARA RECOGER${venta.origen === 'caja_rapida' || venta.tipo === 'venta_rapida' ? ' (CAJA RÁPIDA)' : ''}</strong></div>
                     <div class="mb-1">Cliente: ${venta.cliente || 'N/A'}</div>
                     <div class="mb-1">Teléfono: ${venta.telefono || 'N/A'}</div>
                     ${venta.horaRecoger ? `<div class="mb-1">Hora de recoger: ${venta.horaRecoger}</div>` : ''}
+                </div>
+            `;
+        } else if (venta.canal === 'mesa' && (venta.tipo === 'venta_rapida' || venta.origen === 'caja_rapida')) {
+            infoAdicional = `
+                <div class="border-top">
+                    <div class="mb-1"><strong>MESA / AQUÍ (CAJA RÁPIDA)</strong></div>
+                    ${venta.numeroMesa ? `<div class="mb-1">Mesa: ${venta.numeroMesa}</div>` : ''}
                 </div>
             `;
         }
         
         // Determinar tipo de pedido
         let tipoPedido = '';
-        if (venta.tipo === 'domicilio') tipoPedido = 'DOMICILIO';
-        else if (venta.tipo === 'recoger') tipoPedido = 'PARA RECOGER';
-        else if (venta.tipo === 'venta_rapida') tipoPedido = 'VENTA DIRECTA';
-        
+        if (venta.tipo === 'domicilio' || venta.canal === 'domicilio') {
+            tipoPedido = (venta.tipo === 'venta_rapida' || venta.origen === 'caja_rapida')
+                ? 'DOMICILIO (CAJA RÁPIDA)'
+                : 'DOMICILIO';
+        } else if (venta.tipo === 'recoger' || venta.canal === 'recoger') {
+            tipoPedido = (venta.tipo === 'venta_rapida' || venta.origen === 'caja_rapida')
+                ? 'RECOGER (CAJA RÁPIDA)'
+                : 'PARA RECOGER';
+        } else if (venta.canal === 'mesa' && (venta.tipo === 'venta_rapida' || venta.origen === 'caja_rapida')) {
+            tipoPedido = venta.numeroMesa
+                ? `MESA / AQUÍ ${venta.numeroMesa} (CAJA RÁPIDA)`
+                : 'MESA / AQUÍ (CAJA RÁPIDA)';
+        } else if (venta.tipo === 'venta_rapida') {
+            tipoPedido = 'VENTA DIRECTA';
+        } 
         ventanaImpresion.document.write(`
             <!DOCTYPE html>
             <html>
@@ -499,7 +517,7 @@
                     <div class="mb-1">FACTURA</div>
                     ${tipoPedido ? `<div class="mb-1">${tipoPedido}</div>` : ''}
                     <div class="mb-1">${new Date(venta.fecha).toLocaleString()}</div>
-                    ${venta.mesa && !venta.mesa.startsWith('DOM-') && !venta.mesa.startsWith('REC-') ? 
+                    ${venta.mesa && !venta.mesa.startsWith('DOM-') && !venta.mesa.startsWith('REC-') && !venta.mesa.startsWith('VENTA DIRECTA') && venta.tipo !== 'venta_rapida' ? 
                         `<div class="mb-1">Mesa: ${venta.mesa}</div>` : ''}
                 </div>
                 

@@ -295,6 +295,14 @@
       max-height: 36%;
     }
 
+    .pedido-card.es-venta-rapida {
+      box-shadow: inset 0 0 0 2px rgba(240, 173, 78, 0.85);
+    }
+
+    .pedido-card.es-venta-rapida .pedido-codigo {
+      color: #f0ad4e;
+    }
+
     .pedido-card.es-domicilio .pedido-info-item,
     .pedido-card.es-recoger .pedido-info-item {
       font-size: 0.85rem;
@@ -1095,7 +1103,20 @@
     }
 
     // Función para formatear código de pedido
-    function formatearCodigoPedido(mesa) {
+    function formatearCodigoPedido(mesa, pedido) {
+      const esVR = pedido && (pedido.esVentaRapida || pedido.origen === 'caja_rapida' || pedido.tipo === 'venta_rapida');
+      if (esVR || (mesa && String(mesa).startsWith('VENTA DIRECTA'))) {
+        const canal = (pedido && pedido.canal) || '';
+        if (canal === 'domicilio') return '⚡ VR · DOMICILIO';
+        if (canal === 'recoger') return '⚡ VR · RECOGER';
+        if (canal === 'mesa') {
+          return pedido.numeroMesa
+            ? `⚡ VR · MESA ${pedido.numeroMesa}`
+            : '⚡ VR · AQUÍ';
+        }
+        const extra = String(mesa || '').replace(/^VENTA DIRECTA\s*-?\s*/i, '').trim();
+        return extra ? `⚡ VR · ${extra}` : '⚡ VENTA RÁPIDA';
+      }
       if (mesa.startsWith('DOM-')) {
         return `DOMICILIO ${mesa.replace('DOM-', '')}`;
       } else if (mesa.startsWith('REC-')) {
@@ -1107,13 +1128,14 @@
 
     // Función para renderizar un pedido (totalPedidos = cuántos hay en pantalla para escalar tamaño)
     function renderizarPedido(pedido, esListo = false, totalPedidos = 1) {
-      const codigo = formatearCodigoPedido(pedido.mesa);
+      const codigo = formatearCodigoPedido(pedido.mesa, pedido);
       const esNuevo = pedido.id > ultimoIdVisto && !esListo;
       const items = pedido.items || [];
       const numItems = items.length;
       const muchosItems = numItems >= 2;
-      const esDomicilio = (pedido.mesa || '').toString().startsWith('DOM-');
-      const esRecoger = (pedido.mesa || '').toString().startsWith('REC-');
+      const esDomicilio = (pedido.mesa || '').toString().startsWith('DOM-') || pedido.canal === 'domicilio';
+      const esRecoger = (pedido.mesa || '').toString().startsWith('REC-') || pedido.canal === 'recoger';
+      const esVentaRapida = !!(pedido.esVentaRapida || pedido.origen === 'caja_rapida' || pedido.tipo === 'venta_rapida');
       const claseItems = numItems >= 4 && numItems <= 12 ? `items-${numItems}` : (numItems > 12 ? 'items-12' : '');
       const claseTotal = totalPedidos >= 7 && totalPedidos <= 16 ? `total-${totalPedidos}` : (totalPedidos > 16 ? 'total-16' : '');
 
@@ -1131,20 +1153,27 @@
             </div>
           `;
         }
-        if (pedido.direccion && pedido.mesa.startsWith('DOM-')) {
+        if (pedido.direccion && esDomicilio) {
           infoCliente += `
             <div class="pedido-info-item">
               <strong><i class="fas fa-map-marker-alt"></i> Dirección:</strong> ${pedido.direccion}
             </div>
           `;
         }
-        if (pedido.horaRecoger && pedido.mesa.startsWith('REC-')) {
+        if (pedido.horaRecoger && esRecoger) {
           infoCliente += `
             <div class="pedido-info-item">
               <strong><i class="fas fa-clock"></i> Hora Recoger:</strong> ${pedido.horaRecoger}
             </div>
           `;
         }
+      }
+      if (esVentaRapida) {
+        infoCliente += `
+          <div class="pedido-info-item" style="color:#f0ad4e;font-weight:bold;">
+            <strong><i class="fas fa-bolt"></i> Origen:</strong> Venta rápida
+          </div>
+        `;
       }
 
       /* Mismo formato que el recibo imprimible: tabla Cant | Producto con Detalle */
@@ -1216,6 +1245,7 @@
         muchosItems ? 'muchos-items' : '',
         esDomicilio ? 'es-domicilio' : '',
         esRecoger ? 'es-recoger' : '',
+        esVentaRapida ? 'es-venta-rapida' : '',
         pedido.cambioMesa ? 'tiene-cambio-mesa' : '',
         claseItems,
         claseTotal

@@ -35,9 +35,8 @@ function guardarNombreDomiciliario(nombre) {
   actualizarDatalistDomiciliarios();
 }
 function actualizarDatalistDomiciliarios() {
-  const input = document.getElementById('nombreDomiciliario');
   const datalist = document.getElementById('listaDomiciliarios');
-  if (!input || !datalist) return;
+  if (!datalist) return;
   datalist.innerHTML = '';
   const nombres = obtenerNombresDomiciliarios();
   nombres.forEach(nombre => {
@@ -45,6 +44,22 @@ function actualizarDatalistDomiciliarios() {
     opt.value = nombre;
     datalist.appendChild(opt);
   });
+}
+
+function esVentaCajaRapida(venta) {
+  if (!venta) return false;
+  const mesa = (venta.mesa || '').toString();
+  return venta.tipo === 'venta_rapida'
+    || venta.origen === 'caja_rapida'
+    || mesa === 'VENTA DIRECTA'
+    || mesa.startsWith('VENTA DIRECTA');
+}
+
+function obtenerCanalVentaRapida(venta) {
+  if (!esVentaCajaRapida(venta)) return null;
+  const canal = (venta.canal || '').toLowerCase().trim();
+  if (canal === 'domicilio' || canal === 'recoger' || canal === 'mesa') return canal;
+  return 'sin_canal';
 }
 
 // Función simplificada para obtener todas las ventas del día
@@ -84,16 +99,36 @@ function obtenerTodasLasVentas() {
 
 // Helper: parseo robusto de fechas (ISO y formato local dd/mm/yyyy, hh:mm:ss a. m./p. m.)
 function parseFechaSeguro(valor) {
-    if (valor instanceof Date) return valor;
-    if (typeof valor !== 'string') return null;
+    if (valor instanceof Date) {
+        return isNaN(valor.getTime()) ? null : valor;
+    }
+    if (typeof valor !== 'string') {
+        if (typeof valor === 'number' && Number.isFinite(valor)) {
+            const dNum = new Date(valor);
+            return isNaN(dNum.getTime()) ? null : dNum;
+        }
+        return null;
+    }
+
+    // Normalizar espacios raros de locales es-CO (NBSP / narrow NBSP en a. m. / p. m.)
+    const texto = valor
+        .replace(/\u202f/g, ' ')
+        .replace(/\u00a0/g, ' ')
+        .trim();
 
     // Intentar ISO primero
-    const iso = new Date(valor);
-    if (!isNaN(iso.getTime())) return iso;
+    const iso = new Date(texto);
+    if (!isNaN(iso.getTime()) && (/^\d{4}-\d{2}-\d{2}/.test(texto) || texto.includes('T') || /GMT|UTC|Z$/i.test(texto))) {
+        return iso;
+    }
+    // Date() a veces parsea strings locales; si es válido y no es formato ambiguo dd/mm, usarlo
+    if (!isNaN(iso.getTime()) && !/^\d{1,2}\/\d{1,2}\/\d{4}/.test(texto)) {
+        return iso;
+    }
 
     // Intentar formato local: 16/9/2025, 5:58:46 p. m.
-    const re = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:,\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(a\. m\.|p\. m\.)\s*)?$/i;
-    const m = valor.match(re);
+    const re = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:,\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(a\.\s*m\.|p\.\s*m\.)\s*)?$/i;
+    const m = texto.match(re);
     if (m) {
         const d = parseInt(m[1], 10);
         const mo = parseInt(m[2], 10) - 1;
@@ -101,12 +136,15 @@ function parseFechaSeguro(valor) {
         let h = m[4] ? parseInt(m[4], 10) : 0;
         const min = m[5] ? parseInt(m[5], 10) : 0;
         const s = m[6] ? parseInt(m[6], 10) : 0;
-        const ampm = m[7] ? m[7].toLowerCase() : null;
+        const ampm = m[7] ? m[7].toLowerCase().replace(/\s+/g, ' ') : null;
         if (ampm && ampm.includes('p. m.') && h < 12) h += 12;
         if (ampm && ampm.includes('a. m.') && h === 12) h = 0;
         const dt = new Date(y, mo, d, h, min, s);
         if (!isNaN(dt.getTime())) return dt;
     }
+
+    // Último intento: dejando que el motor parseé
+    if (!isNaN(iso.getTime())) return iso;
     return null;
 }
 
@@ -122,6 +160,42 @@ function esMismaFechaLocal(fechaA, fechaB = new Date()) {
     } catch (e) {
         return false;
     }
+}
+
+// YYYY-MM-DD en zona LOCAL (NUNCA usar toISOString().slice(0,10) para "hoy":
+// en Colombia UTC-5, después de las 7:00 p.m. toISOString ya es el día siguiente).
+function fechaLocalISO(valor = new Date()) {
+    const d = parseFechaSeguro(valor) || (valor instanceof Date ? valor : new Date());
+    if (!d || isNaN(d.getTime())) return '';
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+
+// Filtra ventas para cierre: 'todoDia' = día laboral; 'ultimoCierre' = desde marca de cierre
+function filtrarVentasParaCierre(ventas, rango = 'todoDia') {
+    const hoy = getFechaHoyParaCierre();
+    const ultimaHoraCierreStr = localStorage.getItem('ultimaHoraCierre');
+    const ultimaHoraCierre = ultimaHoraCierreStr ? new Date(ultimaHoraCierreStr) : null;
+    const lista = Array.isArray(ventas) ? ventas : [];
+
+    return lista.filter(v => {
+        try {
+            const fechaVenta = parseFechaSeguro(v.fecha);
+            if (!fechaVenta) return false;
+
+            if (rango === 'ultimoCierre' && ultimaHoraCierre && !isNaN(ultimaHoraCierre.getTime())) {
+                const despuesDeCierre = fechaVenta.getTime() >= ultimaHoraCierre.getTime();
+                return despuesDeCierre && esMismaFechaLocal(fechaVenta, hoy);
+            }
+
+            // Por defecto (y para administrativo): todo el día laboral local
+            return esMismaFechaLocal(fechaVenta, hoy);
+        } catch (e) {
+            return false;
+        }
+    });
 }
 
 // Fecha "de hoy" para cierre y ventas del día. Si está activa la opción
@@ -296,13 +370,13 @@ function reiniciarSistemaCompleto() {
         console.log('📊 Manteniendo historial de ventas para reportes por fecha...');
         const hoy = getFechaHoyParaCierre();
         
-        // 2. Limpiar domicilios del día actual
+        // 2. Limpiar domicilios del día actual (comparar por fecha LOCAL, no UTC)
         console.log('🚚 Limpiando domicilios del día...');
         const domicilios = JSON.parse(localStorage.getItem('domicilios') || '[]');
-        const hoyStr = hoy.getFullYear() + '-' + String(hoy.getMonth() + 1).padStart(2, '0') + '-' + String(hoy.getDate()).padStart(2, '0');
+        const hoyStr = fechaLocalISO(hoy);
         const domiciliosFiltrados = domicilios.filter(domicilio => {
             try {
-                const fechaDomicilio = new Date(domicilio.fecha).toISOString().slice(0, 10);
+                const fechaDomicilio = fechaLocalISO(domicilio.fecha);
                 return fechaDomicilio !== hoyStr;
             } catch (e) {
                 return true; // Mantener si hay error en fecha
@@ -315,7 +389,7 @@ function reiniciarSistemaCompleto() {
         const gastos = JSON.parse(localStorage.getItem('gastos') || '[]');
         const gastosFiltrados = gastos.filter(gasto => {
             try {
-                const fechaGasto = new Date(gasto.fecha).toISOString().slice(0, 10);
+                const fechaGasto = fechaLocalISO(gasto.fecha);
                 return fechaGasto !== hoyStr;
             } catch (e) {
                 return true; // Mantener si hay error en fecha
@@ -348,7 +422,7 @@ function reiniciarSistemaCompleto() {
         console.log('✅ Sistema reiniciado completamente');
         console.log('📊 Estado después del reinicio:');
         console.log(`   - Ventas del día: ${JSON.parse(localStorage.getItem('ventas') || '[]').length}`);
-        console.log(`   - Historial de ventas: ${historialFiltrado.length}`);
+        console.log(`   - Historial de ventas: ${JSON.parse(localStorage.getItem('historialVentas') || '[]').length}`);
         console.log(`   - Domicilios del día: ${domiciliosFiltrados.length}`);
         console.log(`   - Gastos del día: ${gastosFiltrados.length}`);
         console.log(`   - Mesas activas: ${JSON.parse(localStorage.getItem('mesasActivas') || '[]').length}`);
@@ -499,8 +573,8 @@ function actualizarDatosCierreModal() {
     try {
         console.log('🔄 Actualizando datos del modal de cierre...');
         
-        // Obtener el rango seleccionado
-        const rangoSeleccionado = document.querySelector('input[name="rangoVentas"]:checked')?.value || 'ultimoCierre';
+        // Obtener el rango seleccionado (default: TODO EL DÍA — evita cero tras las 7pm / último cierre)
+        const rangoSeleccionado = document.querySelector('input[name="rangoVentas"]:checked')?.value || 'todoDia';
         
         // Obtener la marca de tiempo del último cierre (si existe)
         const ultimaHoraCierreStr = localStorage.getItem('ultimaHoraCierre');
@@ -510,27 +584,8 @@ function actualizarDatosCierreModal() {
         const todasLasVentas = obtenerTodasLasVentas();
         const hoy = getFechaHoyParaCierre();
         
-        // Filtrar ventas según el rango seleccionado
-        const ventasHoy = todasLasVentas.filter(v => {
-            try {
-                const fechaVenta = new Date(v.fecha);
-                
-                if (rangoSeleccionado === 'todoDia') {
-                    // Mostrar todas las ventas del día actual
-                    return esMismaFechaLocal(fechaVenta, hoy);
-                } else {
-                    // Comportamiento por defecto: desde último cierre
-                    if (ultimaHoraCierre) {
-                        const despuesDeCierre = fechaVenta.getTime() >= new Date(ultimaHoraCierre).getTime();
-                        const mismoDia = esMismaFechaLocal(fechaVenta, hoy);
-                        return despuesDeCierre && mismoDia;
-                    }
-                    return esMismaFechaLocal(fechaVenta, hoy);
-                }
-            } catch (e) {
-                return false;
-            }
-        });
+        // Filtrar ventas según el rango seleccionado (usa fecha LOCAL, no UTC)
+        const ventasHoy = filtrarVentasParaCierre(todasLasVentas, rangoSeleccionado);
         
         console.log(`📊 Ventas filtradas: ${ventasHoy.length} (rango: ${rangoSeleccionado})`);
         
@@ -556,14 +611,13 @@ function actualizarDatosCierreModal() {
         
         // Obtener gastos del día
         const gastos = JSON.parse(localStorage.getItem('gastos')) || [];
-        const hoyStrModal = hoy.getFullYear() + '-' + String(hoy.getMonth() + 1).padStart(2, '0') + '-' + String(hoy.getDate()).padStart(2, '0');
         const gastosHoy = gastos.filter(g => {
-            const fechaGasto = new Date(g.fecha);
-            if (ultimaHoraCierre) {
-                return fechaGasto > ultimaHoraCierre;
+            const fechaGasto = parseFechaSeguro(g.fecha);
+            if (!fechaGasto) return false;
+            if (rangoSeleccionado === 'ultimoCierre' && ultimaHoraCierre && !isNaN(ultimaHoraCierre.getTime())) {
+                return fechaGasto.getTime() > ultimaHoraCierre.getTime() && esMismaFechaLocal(fechaGasto, hoy);
             }
-            const fechaGastoStr = fechaGasto.toISOString().slice(0, 10);
-            return fechaGastoStr === hoyStrModal;
+            return esMismaFechaLocal(fechaGasto, hoy);
         });
         const totalGastos = gastosHoy.reduce((sum, g) => sum + (parseFloat(g.monto) || 0), 0);
         
@@ -652,6 +706,21 @@ function actualizarDatosCierreModal() {
         if (document.getElementById('totalTarjetaRapidasHoy')) {
             document.getElementById('totalTarjetaRapidasHoy').textContent = `$ ${calculos.tarjetaRapidas.toLocaleString()}`;
         }
+        const setBloqueRapida = (idBloque, idValor, monto) => {
+            const bloque = document.getElementById(idBloque);
+            const valor = document.getElementById(idValor);
+            if (!bloque || !valor) return;
+            if ((monto || 0) > 0) {
+                bloque.style.display = 'block';
+                valor.textContent = `$ ${monto.toLocaleString()}`;
+            } else {
+                bloque.style.display = 'none';
+            }
+        };
+        setBloqueRapida('bloqueRapidaDomicilioCierre', 'totalRapidaDomicilioHoy', calculos.totalRapidaDomicilio || 0);
+        setBloqueRapida('bloqueRapidaMesaCierre', 'totalRapidaMesaHoy', calculos.totalRapidaMesa || 0);
+        setBloqueRapida('bloqueRapidaRecogerCierre', 'totalRapidaRecogerHoy', calculos.totalRapidaRecoger || 0);
+        setBloqueRapida('bloqueRapidaSinCanalCierre', 'totalRapidaSinCanalHoy', calculos.totalRapidaSinCanal || 0);
         
         if (document.getElementById('totalVentasMesasHoy')) {
             document.getElementById('totalVentasMesasHoy').textContent = `$ ${calculos.totalVentasMesas.toLocaleString()}`;
@@ -1197,7 +1266,9 @@ function mostrarConfirmacionPedidoListo(pedidoId) {
   const pedido = historialCocina.find(p => p.id === pedidoId);
   if (!pedido) return;
   
-  const codigo = pedido.mesa.startsWith('DOM-') ? `DOMICILIO ${pedido.mesa.replace('DOM-', '')}` :
+  const codigo = pedido.mesa.startsWith('VENTA DIRECTA')
+    ? (formatearCodigoPedidoCocina(pedido.mesa))
+    : pedido.mesa.startsWith('DOM-') ? `DOMICILIO ${pedido.mesa.replace('DOM-', '')}` :
                  pedido.mesa.startsWith('REC-') ? `RECOGER ${pedido.mesa.replace('REC-', '')}` :
                  `MESA ${pedido.mesa}`;
   
@@ -1228,12 +1299,18 @@ function mostrarConfirmacionPedidoListo(pedidoId) {
 
 // Función para formatear código de pedido
 function formatearCodigoPedidoCocina(mesa) {
-  if (mesa.startsWith('DOM-')) {
-    return `DOM-${mesa.replace('DOM-', '')}`;
-  } else if (mesa.startsWith('REC-')) {
-    return `REC-${mesa.replace('REC-', '')}`;
+  if (!mesa) return 'PEDIDO';
+  const m = mesa.toString();
+  if (m.startsWith('VENTA DIRECTA')) {
+    const extra = m.replace(/^VENTA DIRECTA\s*-?\s*/i, '').trim();
+    return extra ? `⚡ VR · ${extra}` : '⚡ VENTA RÁPIDA';
+  }
+  if (m.startsWith('DOM-')) {
+    return `DOM-${m.replace('DOM-', '')}`;
+  } else if (m.startsWith('REC-')) {
+    return `REC-${m.replace('REC-', '')}`;
   } else {
-    return `MESA ${mesa}`;
+    return `MESA ${m}`;
   }
 }
 
@@ -3856,8 +3933,33 @@ function mostrarReciboVentaRapida(venta) {
 
         <div class="header text-center">
           <div class="mb-1">${new Date(venta.fecha).toLocaleString()}</div>
-          <div class="mb-1">${venta.mesa === 'VENTA DIRECTA' ? 'Venta Directa' : `Mesa: ${venta.mesa}`}</div>
+          <div class="mb-1"><strong>${(() => {
+            const canal = obtenerCanalVentaRapida(venta);
+            if (canal === 'domicilio') return 'DOMICILIO (Caja rápida)';
+            if (canal === 'recoger') return 'PARA RECOGER (Caja rápida)';
+            if (canal === 'mesa') {
+              return venta.numeroMesa
+                ? `MESA / AQUÍ ${venta.numeroMesa} (Caja rápida)`
+                : 'MESA / AQUÍ (Caja rápida)';
+            }
+            return venta.mesa === 'VENTA DIRECTA' ? 'Venta Directa' : `Mesa: ${venta.mesa}`;
+          })()}</strong></div>
         </div>
+
+        ${venta.canal === 'domicilio' || (venta.cliente && venta.direccion) ? `
+        <div class="border-top">
+          ${venta.cliente ? `<div class="mb-1">Cliente: ${venta.cliente}</div>` : ''}
+          ${venta.telefono ? `<div class="mb-1">Tel: ${venta.telefono}</div>` : ''}
+          ${venta.direccion ? `<div class="mb-1">Dir: ${venta.direccion}</div>` : ''}
+          ${(venta.nombreDomiciliario || '').trim() ? `<div class="mb-1">Domiciliario: ${venta.nombreDomiciliario}</div>` : ''}
+        </div>
+        ` : ''}
+        ${venta.canal === 'recoger' && (venta.cliente || venta.horaRecoger) ? `
+        <div class="border-top">
+          ${venta.cliente ? `<div class="mb-1">Cliente: ${venta.cliente}</div>` : ''}
+          ${venta.horaRecoger ? `<div class="mb-1">Hora: ${venta.horaRecoger}</div>` : ''}
+        </div>
+        ` : ''}
         
         <table>
           <thead>
@@ -3931,11 +4033,16 @@ function mostrarModalAgregarProductosVentaRapida(pedido) {
   cargarCategoriasVentaRapida();
   
   // Mostrar modal
-  const modal = new bootstrap.Modal(document.getElementById('modalAgregarProductosVentaRapida'));
+  const modalEl = document.getElementById('modalAgregarProductosVentaRapida');
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: 'static', keyboard: false });
   modal.show();
   
-  // Agregar evento de tecla F1 para ayuda
+  // F1 ayuda: un solo listener (evitar acumulación)
+  document.removeEventListener('keydown', mostrarAyudaVentaRapida);
   document.addEventListener('keydown', mostrarAyudaVentaRapida);
+  modalEl.addEventListener('hidden.bs.modal', () => {
+    document.removeEventListener('keydown', mostrarAyudaVentaRapida);
+  }, { once: true });
 }
 
 // Función para mostrar ayuda de venta rápida con F1
@@ -4321,54 +4428,296 @@ function procesarVentaRapidaDirecta() {
   
   console.log('   - Total calculado:', total);
   
+  // No limpiar el carrito al cerrar productos: vamos al modal de pago
+  window._ventaRapidaIgnorarLimpiezaProductos = true;
+  
   // Cerrar modal de productos
-  const modalProductos = bootstrap.Modal.getInstance(document.getElementById('modalAgregarProductosVentaRapida'));
+  const modalProductosEl = document.getElementById('modalAgregarProductosVentaRapida');
+  const modalProductos = bootstrap.Modal.getInstance(modalProductosEl) || bootstrap.Modal.getOrCreateInstance(modalProductosEl, { backdrop: 'static', keyboard: false });
   modalProductos.hide();
   
   // Mostrar modal de confirmación
   mostrarModalVentaRapida(window.pedidoVentaRapida, total, total, 0, 0, 0, 0);
 }
 
+// Volver del pago a la selección de productos sin perder la orden
+function volverAProductosVentaRapida() {
+  const modalPagoEl = document.getElementById('modalVentaRapida');
+  const modalPago = bootstrap.Modal.getInstance(modalPagoEl);
+  if (modalPago) modalPago.hide();
+
+  // Restaurar items desde datos temporales si el pedido se vació por error
+  if (window.datosVentaRapida?.pedido?.items?.length) {
+    if (!window.pedidoVentaRapida) {
+      window.pedidoVentaRapida = {
+        items: [],
+        cliente: null,
+        telefono: null,
+        direccion: null,
+        horaRecoger: null,
+        tipo: 'venta_rapida'
+      };
+    }
+    if (!window.pedidoVentaRapida.items?.length) {
+      window.pedidoVentaRapida.items = window.datosVentaRapida.pedido.items.map(item => ({ ...item }));
+    }
+  }
+
+  const modalProductosEl = document.getElementById('modalAgregarProductosVentaRapida');
+  const modalProductos = bootstrap.Modal.getOrCreateInstance(modalProductosEl, { backdrop: 'static', keyboard: false });
+  modalProductos.show();
+
+  setTimeout(() => {
+    actualizarListaProductosVentaRapida();
+    actualizarTotalVentaRapida();
+  }, 150);
+}
+
 // Función para limpiar pedido de venta rápida
 function limpiarPedidoVentaRapida() {
   if (window.pedidoVentaRapida) {
     window.pedidoVentaRapida.items = [];
-    actualizarListaProductosVentaRapida();
-    actualizarTotalVentaRapida();
+    const lista = document.getElementById('listaProductosVentaRapida');
+    const totalEl = document.getElementById('totalVentaRapidaModal');
+    if (lista || totalEl) {
+      actualizarListaProductosVentaRapida();
+      actualizarTotalVentaRapida();
+    }
   }
+}
+
+function obtenerCanalSeleccionadoVentaRapida() {
+  const seleccionado = document.querySelector('input[name="canalVentaRapida"]:checked');
+  return seleccionado ? seleccionado.value : 'mesa';
+}
+
+function cambiarCanalVentaRapida() {
+  const canal = obtenerCanalSeleccionadoVentaRapida();
+  const mesaEl = document.getElementById('camposCanalMesaVR');
+  const recogerEl = document.getElementById('camposCanalRecogerVR');
+  const domicilioEl = document.getElementById('camposCanalDomicilioVR');
+  if (mesaEl) mesaEl.style.display = canal === 'mesa' ? 'block' : 'none';
+  if (recogerEl) recogerEl.style.display = canal === 'recoger' ? 'block' : 'none';
+  if (domicilioEl) domicilioEl.style.display = canal === 'domicilio' ? 'block' : 'none';
+  if (canal === 'domicilio') {
+    buscarClientesVentaRapida(true);
+  } else {
+    const lista = document.getElementById('listaClientesVentaRapida');
+    if (lista) lista.innerHTML = '';
+  }
+  actualizarTotalCanalVentaRapida();
+}
+
+function escaparHtmlClienteVR(texto) {
+  return String(texto || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buscarClientesVentaRapida(mostrarRecientes = false) {
+  const input = document.getElementById('buscarClienteVentaRapida');
+  const lista = document.getElementById('listaClientesVentaRapida');
+  if (!lista) return;
+
+  lista.innerHTML = '';
+  const busqueda = (input?.value || '').toLowerCase().trim();
+  const fuente = Array.isArray(clientes) ? clientes : [];
+
+  let filtrados;
+  if (busqueda) {
+    filtrados = fuente.filter(cliente => {
+      const nombre = (cliente.nombre || '').toLowerCase();
+      const telefono = (cliente.telefono || '').toString().toLowerCase();
+      const direccion = (cliente.direccion || '').toLowerCase();
+      return nombre.includes(busqueda) || telefono.includes(busqueda) || direccion.includes(busqueda);
+    });
+  } else if (mostrarRecientes) {
+    // Sin búsqueda: mostrar últimos clientes (máx. 8) para elegir rápido
+    filtrados = [...fuente].slice(-8).reverse();
+  } else {
+    return;
+  }
+
+  if (filtrados.length === 0) {
+    lista.innerHTML = '<div class="list-group-item bg-dark text-muted border-secondary small">No se encontraron clientes</div>';
+    return;
+  }
+
+  filtrados.forEach(cliente => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'list-group-item list-group-item-action bg-dark text-white border-secondary py-2';
+    const dir = (cliente.direccion && cliente.direccion !== 'No proporcionado') ? cliente.direccion : '';
+    item.innerHTML = `
+      <div class="d-flex justify-content-between align-items-start gap-2">
+        <div class="text-start">
+          <div class="fw-semibold">${escaparHtmlClienteVR(cliente.nombre)}</div>
+          <small class="text-muted">${escaparHtmlClienteVR(cliente.telefono)}${dir ? ' · ' + escaparHtmlClienteVR(dir) : ''}</small>
+        </div>
+        <span class="badge bg-warning text-dark align-self-center">Usar</span>
+      </div>
+    `;
+    item.onclick = () => seleccionarClienteVentaRapida(cliente.id);
+    lista.appendChild(item);
+  });
+}
+
+function seleccionarClienteVentaRapida(clienteId) {
+  const fuente = Array.isArray(clientes) ? clientes : [];
+  const cliente = fuente.find(c => String(c.id) === String(clienteId));
+  if (!cliente) {
+    alert('No se encontró el cliente seleccionado');
+    return;
+  }
+
+  const nombreEl = document.getElementById('clienteDomicilioVentaRapida');
+  const telEl = document.getElementById('telefonoDomicilioVentaRapida');
+  const dirEl = document.getElementById('direccionDomicilioVentaRapida');
+  if (nombreEl) nombreEl.value = cliente.nombre || '';
+  if (telEl) telEl.value = cliente.telefono || '';
+  if (dirEl) {
+    const dir = cliente.direccion || '';
+    dirEl.value = (dir === 'No proporcionado') ? '' : dir;
+  }
+
+  const aviso = document.getElementById('clienteSeleccionadoVentaRapida');
+  if (aviso) {
+    aviso.style.display = 'block';
+    aviso.innerHTML = `<i class="fas fa-check-circle"></i> Cliente: <strong>${escaparHtmlClienteVR(cliente.nombre)}</strong>`;
+  }
+
+  const lista = document.getElementById('listaClientesVentaRapida');
+  if (lista) lista.innerHTML = '';
+  const busqueda = document.getElementById('buscarClienteVentaRapida');
+  if (busqueda) busqueda.value = '';
+}
+
+function limpiarClienteVentaRapida() {
+  const ids = [
+    'buscarClienteVentaRapida',
+    'clienteDomicilioVentaRapida',
+    'telefonoDomicilioVentaRapida',
+    'direccionDomicilioVentaRapida'
+  ];
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  const aviso = document.getElementById('clienteSeleccionadoVentaRapida');
+  if (aviso) {
+    aviso.style.display = 'none';
+    aviso.innerHTML = '';
+  }
+  buscarClientesVentaRapida(true);
+}
+
+function obtenerValorDomicilioVentaRapida() {
+  if (obtenerCanalSeleccionadoVentaRapida() !== 'domicilio') return 0;
+  return Math.max(0, parseFloat(document.getElementById('valorDomicilioVentaRapida')?.value) || 0);
+}
+
+function actualizarTotalCanalVentaRapida() {
+  if (!window.datosVentaRapida) return;
+  const subtotal = window.datosVentaRapida.subtotal || 0;
+  const valorDomicilio = obtenerValorDomicilioVentaRapida();
+  const total = Math.round(subtotal + valorDomicilio);
+  window.datosVentaRapida.valorDomicilio = valorDomicilio;
+  window.datosVentaRapida.total = total;
+  actualizarResumenVentaRapidaUI(subtotal, 0, 0, valorDomicilio, 0, total);
+  calcularCambioVentaRapida();
+}
+
+function actualizarResumenVentaRapidaUI(subtotal, propina, descuento, valorDomicilio, propinaCalculada, total) {
+  const resumenEl = document.getElementById('resumenVentaRapida');
+  if (resumenEl) {
+    resumenEl.innerHTML = `
+      <div class="small">
+        <div class="d-flex justify-content-between mb-1">
+          <span>Subtotal:</span>
+          <span>${formatearPrecio(subtotal)}</span>
+        </div>
+        <div class="d-flex justify-content-between mb-1">
+          <span>Propina (${propina}%):</span>
+          <span>${formatearPrecio(propinaCalculada)}</span>
+        </div>
+        <div class="d-flex justify-content-between mb-1">
+          <span>Descuento:</span>
+          <span>${formatearPrecio(descuento)}</span>
+        </div>
+        <div class="d-flex justify-content-between mb-1">
+          <span>Domicilio:</span>
+          <span>${formatearPrecio(valorDomicilio)}</span>
+        </div>
+        <hr class="my-2">
+        <div class="d-flex justify-content-between fw-bold">
+          <span>TOTAL:</span>
+          <span class="text-warning">${formatearPrecio(total)}</span>
+        </div>
+      </div>
+    `;
+  }
+  const totalEl = document.getElementById('totalVentaRapida');
+  if (totalEl) totalEl.textContent = formatearPrecio(total);
+}
+
+function recolectarDatosCanalVentaRapida() {
+  const canal = obtenerCanalSeleccionadoVentaRapida();
+  const datos = {
+    canal,
+    cliente: null,
+    telefono: null,
+    direccion: null,
+    horaRecoger: null,
+    numeroMesa: null,
+    valorDomicilio: 0,
+    nombreDomiciliario: ''
+  };
+
+  if (canal === 'mesa') {
+    datos.numeroMesa = (document.getElementById('numeroMesaVentaRapida')?.value || '').trim() || null;
+  } else if (canal === 'recoger') {
+    datos.cliente = (document.getElementById('clienteRecogerVentaRapida')?.value || '').trim() || null;
+    datos.horaRecoger = (document.getElementById('horaRecogerVentaRapida')?.value || '').trim() || null;
+  } else if (canal === 'domicilio') {
+    datos.cliente = (document.getElementById('clienteDomicilioVentaRapida')?.value || '').trim();
+    datos.telefono = (document.getElementById('telefonoDomicilioVentaRapida')?.value || '').trim();
+    datos.direccion = (document.getElementById('direccionDomicilioVentaRapida')?.value || '').trim();
+    datos.valorDomicilio = obtenerValorDomicilioVentaRapida();
+    datos.nombreDomiciliario = (document.getElementById('nombreDomiciliarioVentaRapida')?.value || '').trim();
+  }
+  return datos;
+}
+
+function validarDatosCanalVentaRapida(datosCanal) {
+  if (datosCanal.canal !== 'domicilio') return true;
+  if (!datosCanal.cliente) {
+    alert('En domicilio el nombre del cliente es obligatorio');
+    return false;
+  }
+  if (!datosCanal.telefono) {
+    alert('En domicilio el teléfono es obligatorio');
+    return false;
+  }
+  if (!datosCanal.direccion) {
+    alert('En domicilio la dirección es obligatoria');
+    return false;
+  }
+  return true;
+}
+
+function etiquetaMesaVentaRapida(canal, numeroMesa) {
+  if (canal === 'domicilio') return 'VENTA DIRECTA - DOMICILIO';
+  if (canal === 'recoger') return 'VENTA DIRECTA - RECOGER';
+  if (canal === 'mesa' && numeroMesa) return `VENTA DIRECTA - MESA ${numeroMesa}`;
+  if (canal === 'mesa') return 'VENTA DIRECTA - AQUÍ';
+  return 'VENTA DIRECTA';
 }
 
 // Función para mostrar modal de venta rápida
 function mostrarModalVentaRapida(pedido, total, subtotal, propina, descuento, valorDomicilio, propinaCalculada) {
-  // Configurar el resumen
-  const resumenHTML = `
-    <div class="small">
-      <div class="d-flex justify-content-between mb-1">
-        <span>Subtotal:</span>
-        <span>${formatearPrecio(subtotal)}</span>
-      </div>
-      <div class="d-flex justify-content-between mb-1">
-        <span>Propina (${propina}%):</span>
-        <span>${formatearPrecio(propinaCalculada)}</span>
-      </div>
-      <div class="d-flex justify-content-between mb-1">
-        <span>Descuento:</span>
-        <span>${formatearPrecio(descuento)}</span>
-      </div>
-      <div class="d-flex justify-content-between mb-1">
-        <span>Domicilio:</span>
-        <span>${formatearPrecio(valorDomicilio)}</span>
-      </div>
-      <hr class="my-2">
-      <div class="d-flex justify-content-between fw-bold">
-        <span>TOTAL:</span>
-        <span class="text-warning">${formatearPrecio(total)}</span>
-      </div>
-    </div>
-  `;
-  
-  document.getElementById('resumenVentaRapida').innerHTML = resumenHTML;
-  document.getElementById('totalVentaRapida').textContent = formatearPrecio(total);
+  actualizarResumenVentaRapidaUI(subtotal, propina, descuento, valorDomicilio || 0, propinaCalculada, total);
   
   // Limpiar campos
   document.getElementById('montoRecibidoVentaRapida').value = '';
@@ -4379,16 +4728,43 @@ function mostrarModalVentaRapida(pedido, total, subtotal, propina, descuento, va
   cambioEl.style.fontWeight = 'bold';
   cambioEl.style.fontSize = '1.2em';
 
-  // Debug: verificar datos antes de guardar
-  console.log('🔍 DEBUG MOSTRAR MODAL VENTA RÁPIDA:');
-  console.log('   - Pedido recibido:', pedido);
-  console.log('   - Items del pedido:', pedido.items);
-  console.log('   - Total:', total);
-  
-  // Guardar datos para usar en confirmación (hacer copia profunda del pedido)
+  // Reset canal UI
+  const canalMesa = document.getElementById('canalVRMesa');
+  if (canalMesa) canalMesa.checked = true;
+  const numeroMesaEl = document.getElementById('numeroMesaVentaRapida');
+  if (numeroMesaEl) numeroMesaEl.value = '';
+  const clienteRec = document.getElementById('clienteRecogerVentaRapida');
+  if (clienteRec) clienteRec.value = '';
+  const horaRec = document.getElementById('horaRecogerVentaRapida');
+  if (horaRec) horaRec.value = '';
+  const clienteDom = document.getElementById('clienteDomicilioVentaRapida');
+  if (clienteDom) clienteDom.value = '';
+  const telDom = document.getElementById('telefonoDomicilioVentaRapida');
+  if (telDom) telDom.value = '';
+  const dirDom = document.getElementById('direccionDomicilioVentaRapida');
+  if (dirDom) dirDom.value = '';
+  const valDom = document.getElementById('valorDomicilioVentaRapida');
+  if (valDom) valDom.value = '';
+  const nomDom = document.getElementById('nombreDomiciliarioVentaRapida');
+  if (nomDom) nomDom.value = '';
+  const buscarClienteVR = document.getElementById('buscarClienteVentaRapida');
+  if (buscarClienteVR) buscarClienteVR.value = '';
+  const listaClientesVR = document.getElementById('listaClientesVentaRapida');
+  if (listaClientesVR) listaClientesVR.innerHTML = '';
+  const avisoClienteVR = document.getElementById('clienteSeleccionadoVentaRapida');
+  if (avisoClienteVR) {
+    avisoClienteVR.style.display = 'none';
+    avisoClienteVR.innerHTML = '';
+  }
+  const enviarCocinaEl = document.getElementById('enviarCocinaVentaRapida');
+  if (enviarCocinaEl) enviarCocinaEl.checked = false;
+  cambiarCanalVentaRapida();
+  actualizarDatalistDomiciliarios();
+
+  // Guardar datos para usar en confirmación
   window.datosVentaRapida = {
     pedido: {
-      items: [...pedido.items], // Copia profunda del array de items
+      items: (pedido.items || []).map(item => ({ ...item })),
       cliente: pedido.cliente,
       telefono: pedido.telefono,
       direccion: pedido.direccion,
@@ -4397,16 +4773,15 @@ function mostrarModalVentaRapida(pedido, total, subtotal, propina, descuento, va
     },
     total: total,
     subtotal: subtotal,
-    propina: propina,
-    descuento: descuento,
-    valorDomicilio: valorDomicilio,
-    propinaCalculada: propinaCalculada
+    propina: propina || 0,
+    descuento: descuento || 0,
+    valorDomicilio: valorDomicilio || 0,
+    propinaCalculada: propinaCalculada || 0
   };
   
-  console.log('   - Datos guardados en window.datosVentaRapida:', window.datosVentaRapida);
-  
-  // Mostrar modal
-  const modal = new bootstrap.Modal(document.getElementById('modalVentaRapida'));
+  // Mostrar modal (no se cierra con clic afuera ni Escape)
+  const modalEl = document.getElementById('modalVentaRapida');
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: 'static', keyboard: false });
   modal.show();
 }
 
@@ -4436,15 +4811,17 @@ function confirmarVentaRapida() {
     alert('Error: No hay datos de venta rápida');
     return;
   }
-  
-  console.log('🔍 DEBUG CONFIRMAR VENTA RÁPIDA:');
-  console.log('   - Datos venta rápida:', window.datosVentaRapida);
-  console.log('   - Pedido:', window.datosVentaRapida.pedido);
-  console.log('   - Items del pedido:', window.datosVentaRapida.pedido.items);
+
+  const datosCanal = recolectarDatosCanalVentaRapida();
+  if (!validarDatosCanalVentaRapida(datosCanal)) return;
   
   const metodoPago = document.getElementById('metodoPagoVentaRapida').value;
   const montoRecibido = parseFloat(document.getElementById('montoRecibidoVentaRapida').value) || 0;
-  const total = window.datosVentaRapida.total;
+  const subtotal = window.datosVentaRapida.subtotal || 0;
+  const total = Math.round(subtotal + (datosCanal.valorDomicilio || 0));
+  window.datosVentaRapida.total = total;
+  window.datosVentaRapida.valorDomicilio = datosCanal.valorDomicilio || 0;
+  window.datosVentaRapida.canalDatos = datosCanal;
   
   // Validar monto recibido si es efectivo
   if (metodoPago === 'efectivo' && montoRecibido < total) {
@@ -4478,57 +4855,74 @@ function confirmarVentaRapida() {
         ).join('\n');
         
         alert(`⚠️ No se puede procesar la venta. Los siguientes productos no tienen stock suficiente:\n\n${mensaje}\n\nPor favor, ajusta las cantidades o elimina estos productos de la orden.`);
-        return; // Bloquear el procesamiento de la venta
+        return;
       }
     }
   } catch (error) {
     console.error('Error al validar stock antes de procesar venta rápida:', error);
-    // Continuar con la venta si hay error en la verificación (por seguridad)
   }
   
-  // Marcar todos los items como "listo" (no van a cocina)
+  // Marcar items: cocina opcional o listos
+  const enviarACocina = !!document.getElementById('enviarCocinaVentaRapida')?.checked;
+  window.datosVentaRapida.enviarACocina = enviarACocina;
   window.datosVentaRapida.pedido.items.forEach(item => {
-    item.estado = 'listo';
+    item.estado = enviarACocina ? 'en_cocina' : 'listo';
   });
   
   // Procesar venta rápida con método de pago seleccionado
+  window._ventaRapidaVentaCompletada = true;
   procesarVentaRapida(window.datosVentaRapida.pedido, total, metodoPago, montoRecibido);
   
   // Cerrar modal
   const modal = bootstrap.Modal.getInstance(document.getElementById('modalVentaRapida'));
-  modal.hide();
+  if (modal) modal.hide();
   
   // Limpiar datos
   window.datosVentaRapida = null;
+  window.pedidoVentaRapida = null;
 }
 
 // Función para procesar venta rápida (actualizada)
 function procesarVentaRapida(pedido, total, metodoPago = 'efectivo', montoRecibido = 0) {
-  console.log('🔍 DEBUG PROCESAR VENTA RÁPIDA:');
-  console.log('   - Pedido recibido:', pedido);
-  console.log('   - Items del pedido:', pedido.items);
-  console.log('   - Total recibido:', total);
+  const datosCanal = (window.datosVentaRapida && window.datosVentaRapida.canalDatos)
+    ? window.datosVentaRapida.canalDatos
+    : { canal: 'mesa', valorDomicilio: 0, nombreDomiciliario: '', cliente: null, telefono: null, direccion: null, horaRecoger: null, numeroMesa: null };
+
+  const propina = (window.datosVentaRapida && typeof window.datosVentaRapida.propina === 'number')
+    ? window.datosVentaRapida.propina
+    : 0;
+  const descuento = (window.datosVentaRapida && typeof window.datosVentaRapida.descuento === 'number')
+    ? window.datosVentaRapida.descuento
+    : 0;
+  const valorDomicilio = datosCanal.valorDomicilio || 0;
+  const subtotal = (pedido.items || []).reduce((sum, item) => sum + (item.precio * item.cantidad), 0);
   
   // Crear objeto de venta
   const venta = {
     id: Date.now(),
-    mesa: pedido.tipo === 'venta_rapida' ? 'VENTA DIRECTA' : mesaSeleccionada,
+    mesa: etiquetaMesaVentaRapida(datosCanal.canal, datosCanal.numeroMesa),
     items: pedido.items || [],
-    subtotal: (pedido.items || []).reduce((sum, item) => sum + (item.precio * item.cantidad), 0),
-    propina: parseFloat(document.getElementById('propina')?.value) || 0,
-    descuento: parseFloat(document.getElementById('descuento')?.value) || 0,
-    valorDomicilio: parseFloat(document.getElementById('valorDomicilio')?.value) || 0,
-    nombreDomiciliario: (document.getElementById('nombreDomiciliario')?.value || '').trim(),
+    subtotal: subtotal,
+    propina: propina,
+    descuento: descuento,
+    valorDomicilio: valorDomicilio,
+    nombreDomiciliario: datosCanal.nombreDomiciliario || '',
+    cliente: datosCanal.cliente,
+    telefono: datosCanal.telefono,
+    direccion: datosCanal.direccion,
+    horaRecoger: datosCanal.horaRecoger,
+    numeroMesa: datosCanal.numeroMesa,
     total: total,
     metodoPago: metodoPago,
     montoRecibido: montoRecibido,
     cambio: Math.max(0, montoRecibido - total),
     fecha: new Date().toISOString(),
     tipo: 'venta_rapida',
-    estado: 'completada'
+    origen: 'caja_rapida',
+    canal: datosCanal.canal,
+    estado: 'completada',
+    enviadoACocina: !!(window.datosVentaRapida && window.datosVentaRapida.enviarACocina)
   };
-  
-  console.log('   - Venta creada:', venta);
 
   // Guardar en historial
   let historial = JSON.parse(localStorage.getItem('historialVentas') || '[]');
@@ -4536,16 +4930,14 @@ function procesarVentaRapida(pedido, total, metodoPago = 'efectivo', montoRecibi
   localStorage.setItem('historialVentas', JSON.stringify(historial));
   if (venta.nombreDomiciliario) guardarNombreDomiciliario(venta.nombreDomiciliario);
 
-  // Debug: verificar que se guardó correctamente
-  console.log('🔍 DEBUG VENTA RÁPIDA:');
-  console.log('   - Venta creada:', venta);
-  console.log('   - Historial antes:', historial.length - 1, 'ventas');
-  console.log('   - Historial después:', historial.length, 'ventas');
+  // Enviar a cocina si se marcó la opción
+  if (venta.enviadoACocina) {
+    enviarVentaRapidaACocina(venta);
+  }
 
   // Actualizar inventario si está disponible
   try {
     if (typeof actualizarInventarioDesdeVenta === 'function') {
-      // Preparar los items para la actualización del inventario
       const itemsParaInventario = pedido.items.map(item => ({
         nombre: item.nombre,
         cantidad: item.cantidad,
@@ -4553,19 +4945,16 @@ function procesarVentaRapida(pedido, total, metodoPago = 'efectivo', montoRecibi
         mesa: venta.mesa || 'VENTA DIRECTA'
       }));
       
-      // Actualizar inventario
       const resultadoInventario = actualizarInventarioDesdeVenta(itemsParaInventario);
       
       if (resultadoInventario && resultadoInventario.success) {
         console.log('Inventario actualizado exitosamente desde venta rápida:', resultadoInventario);
         
-        // Mostrar notificación si hay productos con stock bajo
         if (resultadoInventario.productosStockBajo && resultadoInventario.productosStockBajo.length > 0) {
           const productosBajo = resultadoInventario.productosStockBajo.map(p => p.nombre).join(', ');
           console.warn(`Productos con stock bajo después de la venta: ${productosBajo}`);
         }
         
-        // Mostrar notificación si hay productos no encontrados en inventario
         if (resultadoInventario.productosNoEncontrados && resultadoInventario.productosNoEncontrados.length > 0) {
           const productosNoEncontrados = resultadoInventario.productosNoEncontrados.join(', ');
           console.warn(`Productos no encontrados en inventario: ${productosNoEncontrados}`);
@@ -4600,15 +4989,25 @@ function procesarVentaRapida(pedido, total, metodoPago = 'efectivo', montoRecibi
 
 // Función para mostrar confirmación de venta rápida
 function mostrarConfirmacionVentaRapida(venta) {
+  const canal = obtenerCanalVentaRapida(venta);
+  let etiquetaCanal = 'Venta Directa';
+  if (canal === 'domicilio') etiquetaCanal = 'Domicilio (caja rápida)';
+  else if (canal === 'recoger') etiquetaCanal = 'Recoger (caja rápida)';
+  else if (canal === 'mesa') {
+    etiquetaCanal = venta.numeroMesa
+      ? `Mesa / Aquí ${venta.numeroMesa} (caja rápida)`
+      : 'Mesa / Aquí (caja rápida)';
+  }
+
   const confirmacion = document.createElement('div');
   confirmacion.className = 'alert alert-success alert-dismissible fade show position-fixed';
   confirmacion.style.cssText = 'top: 20px; right: 20px; z-index: 9999; max-width: 400px; animation: slideInRight 0.5s ease;';
   confirmacion.innerHTML = `
     <strong>⚡ Venta Rápida Completada</strong>
-    <p class="mb-0">${venta.mesa === 'VENTA DIRECTA' ? 'Venta Directa' : `Mesa: ${venta.mesa}`}</p>
+    <p class="mb-0">${etiquetaCanal}</p>
     <p class="mb-0">Total: ${formatearPrecio(venta.total)}</p>
     <p class="mb-0">Método: ${venta.metodoPago.toUpperCase()}</p>
-    <p class="mb-0 small">Productos marcados como LISTO</p>
+    <p class="mb-0 small">${venta.enviadoACocina ? 'Enviado a cocina + recibo' : 'Productos listos - sin cocina'}</p>
     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
   `;
   
@@ -4625,6 +5024,73 @@ function mostrarConfirmacionVentaRapida(venta) {
       }, 500);
     }
   }, 5000);
+}
+
+// Enviar venta rápida a historial de cocina + imprimir ticket
+function enviarVentaRapidaACocina(venta) {
+  try {
+    const itemsCocina = (venta.items || []).map(item => ({
+      ...item,
+      estado: 'en_cocina'
+    }));
+
+    if (itemsCocina.length === 0) return;
+
+    const ordenCocina = {
+      id: venta.id,
+      fecha: new Date().toISOString(),
+      fechaMostrar: new Date().toLocaleString(),
+      mesa: venta.mesa,
+      items: itemsCocina,
+      cliente: venta.cliente || null,
+      telefono: venta.telefono || null,
+      direccion: venta.direccion || null,
+      horaRecoger: venta.horaRecoger || null,
+      numeroMesa: venta.numeroMesa || null,
+      canal: venta.canal || null,
+      origen: 'caja_rapida',
+      tipo: 'venta_rapida',
+      esVentaRapida: true,
+      ronda: 1,
+      ventaId: venta.id
+    };
+
+    if (!Array.isArray(historialCocina)) {
+      historialCocina = JSON.parse(localStorage.getItem('historialCocina') || '[]');
+    }
+    historialCocina.push(ordenCocina);
+    guardarHistorialCocina();
+
+    try {
+      if (typeof ordenesCocina !== 'undefined' && ordenesCocina instanceof Map) {
+        ordenesCocina.set(venta.mesa, itemsCocina);
+      }
+    } catch (e) { /* ignore */ }
+
+    imprimirTicketCocina(venta.mesa, itemsCocina, {
+      esVentaRapida: true,
+      pedido: {
+        cliente: venta.cliente,
+        telefono: venta.telefono,
+        direccion: venta.direccion,
+        horaRecoger: venta.horaRecoger,
+        numeroMesa: venta.numeroMesa,
+        canal: venta.canal,
+        ronda: 1,
+        origen: 'caja_rapida',
+        tipo: 'venta_rapida'
+      }
+    });
+
+    if (typeof actualizarPanelCocina === 'function') actualizarPanelCocina();
+    if (typeof actualizarBadgeCocina === 'function') actualizarBadgeCocina();
+    if (typeof mostrarConfirmacionEnviadoACocina === 'function') {
+      mostrarConfirmacionEnviadoACocina(itemsCocina.length);
+    }
+  } catch (error) {
+    console.error('Error al enviar venta rápida a cocina:', error);
+    alert('La venta se guardó, pero hubo un problema al enviar a cocina. Revisa la pantalla de cocina.');
+  }
 }
 
 // Función para generar ticket de cocina
@@ -4880,27 +5346,48 @@ function mostrarVistaPreviaPedido() {
 }
 
 // Función para imprimir ticket de cocina
-function imprimirTicketCocina(mesa, productos) {
+function imprimirTicketCocina(mesa, productos, opciones = {}) {
   const ventana = obtenerVentanaImpresion();
   if (!ventana) {
     alert('No se pudo abrir la ventana de impresión. Por favor, verifique que los bloqueadores de ventanas emergentes estén desactivados.');
     return;
   }
   
-  // Obtener el pedido completo para acceder a la información del cliente
-  const pedidoCompleto = mesasActivas.get(mesa);
+  // Obtener el pedido completo (mesa activa o datos explícitos ej. venta rápida)
+  const pedidoCompleto = opciones.pedido || mesasActivas.get(mesa);
+  const esVentaRapida = !!(opciones.esVentaRapida
+    || opciones.origen === 'caja_rapida'
+    || (pedidoCompleto && (pedidoCompleto.esVentaRapida || pedidoCompleto.origen === 'caja_rapida' || pedidoCompleto.tipo === 'venta_rapida'))
+    || (mesa && String(mesa).startsWith('VENTA DIRECTA')));
+
+  let etiquetaCanalVR = '';
+  if (esVentaRapida) {
+    const canal = (pedidoCompleto && pedidoCompleto.canal) || '';
+    if (canal === 'domicilio') etiquetaCanalVR = 'DOMICILIO';
+    else if (canal === 'recoger') etiquetaCanalVR = 'RECOGER';
+    else if (canal === 'mesa') {
+      etiquetaCanalVR = pedidoCompleto.numeroMesa
+        ? `MESA / AQUÍ ${pedidoCompleto.numeroMesa}`
+        : 'MESA / AQUÍ';
+    } else {
+      etiquetaCanalVR = String(mesa || 'VENTA DIRECTA').replace(/^VENTA DIRECTA\s*-?\s*/i, '') || 'DIRECTA';
+    }
+  }
+
   let infoCliente = '';
   
   if (pedidoCompleto && pedidoCompleto.cliente) {
+    const esDom = mesa.startsWith('DOM-') || (pedidoCompleto.canal === 'domicilio') || (esVentaRapida && pedidoCompleto.direccion);
+    const esRec = mesa.startsWith('REC-') || (pedidoCompleto.canal === 'recoger');
     infoCliente = `
       <div class="cliente-info">
         <div class="cliente-label">Cliente:</div>
         <div class="cliente-datos">
           <strong>${pedidoCompleto.cliente}</strong><br>
           Tel: ${pedidoCompleto.telefono || 'No disponible'}<br>
-          ${mesa.startsWith('DOM-') ? 
-            `Dir: ${pedidoCompleto.direccion || 'No disponible'}` : 
-            `Hora: ${pedidoCompleto.horaRecoger || 'No disponible'}`
+          ${esDom
+            ? `Dir: ${pedidoCompleto.direccion || 'No disponible'}`
+            : (esRec ? `Hora: ${pedidoCompleto.horaRecoger || 'No disponible'}` : '')
           }
         </div>
       </div>
@@ -4924,11 +5411,19 @@ function imprimirTicketCocina(mesa, productos) {
       </div>
     `;
   }
+
+  const bannerVentaRapida = esVentaRapida ? `
+      <div style="border: 2px solid #000; padding: 2mm; margin: 1mm 0; text-align: center; font-weight: bold;">
+        <div style="font-size: 18px;">⚡ VENTA RÁPIDA</div>
+        ${etiquetaCanalVR ? `<div style="font-size: 14px; margin-top: 1mm;">${etiquetaCanalVR}</div>` : ''}
+      </div>
+    ` : '';
   
   const contenido = `
     <div class="header text-center">
       <h2 style="margin: 0; font-size: 28px; font-weight: bold;">COCINA</h2>
-      <div class="mb-1" style="font-size: 22px; font-weight: bold;">Mesa: ${mesa}</div>
+      ${bannerVentaRapida}
+      <div class="mb-1" style="font-size: 22px; font-weight: bold;">${esVentaRapida ? `Ref: ${mesa}` : `Mesa: ${mesa}`}</div>
       <div class="mb-1" style="font-size: 20px; font-weight: bold;">Ronda: ${pedidoCompleto && pedidoCompleto.ronda ? pedidoCompleto.ronda : 1}</div>
       <div class="mb-1">${new Date().toLocaleString()}</div>
     </div>
@@ -4962,7 +5457,7 @@ function imprimirTicketCocina(mesa, productos) {
     </table>
     
     <div class="text-center mt-1">
-      <div class="border-top">¡Gracias!</div>
+      <div class="border-top">${esVentaRapida ? 'Pedido por VENTA RÁPIDA' : '¡Gracias!'}</div>
     </div>
   `;
   
@@ -6119,31 +6614,16 @@ function mostrarModalCierreDiario() {
     try {
         console.log('=== INICIANDO CIERRE ADMINISTRATIVO ===');
         
-        // Obtener todas las ventas del día
+        // Obtener todas las ventas del día (fecha LOCAL; no usar toISOString del día)
         const todasLasVentas = obtenerTodasLasVentas();
         const hoy = getFechaHoyParaCierre();
+        const rangoSeleccionado = document.querySelector('input[name="rangoVentas"]:checked')?.value || 'todoDia';
         const ultimaHoraCierreStr = localStorage.getItem('ultimaHoraCierre');
         const ultimaHoraCierre = ultimaHoraCierreStr ? new Date(ultimaHoraCierreStr) : null;
         
-        // Filtrar ventas según último cierre (por turno) o por día si no hay cierre previo
-        const ventasHoy = todasLasVentas.filter(v => {
-            try {
-                const fechaVenta = new Date(v.fecha);
-                
-                if (ultimaHoraCierre) {
-                    const despuesDeCierre = fechaVenta.getTime() >= ultimaHoraCierre.getTime();
-                    const mismoDia = esMismaFechaLocal(fechaVenta, hoy);
-                    return despuesDeCierre && mismoDia;
-                }
-                
-                // Si no hay marca de cierre, usar todo el día actual
-                return esMismaFechaLocal(fechaVenta, hoy);
-            } catch (e) {
-                return false;
-            }
-        });
+        const ventasHoy = filtrarVentasParaCierre(todasLasVentas, rangoSeleccionado);
         
-        console.log(`📊 Ventas del día: ${ventasHoy.length}`);
+        console.log(`📊 Ventas del día: ${ventasHoy.length} (rango: ${rangoSeleccionado})`);
         
         // Calcular totales con mixto desglosado: efectivo y transferencia incluyen la parte mixta
         const calculos = calcularTotalesVentas(ventasHoy);
@@ -6164,16 +6644,15 @@ function mostrarModalCierreDiario() {
             return sum + valorDom;
         }, 0);
         
-        // Obtener gastos del día (también respetando último cierre si existe)
+        // Obtener gastos del día (también respetando rango)
         const gastos = JSON.parse(localStorage.getItem('gastos') || '[]');
         const gastosHoy = gastos.filter(g => {
             try {
-                const fechaGasto = new Date(g.fecha);
-                
-                if (ultimaHoraCierre) {
-                    return fechaGasto > ultimaHoraCierre;
+                const fechaGasto = parseFechaSeguro(g.fecha);
+                if (!fechaGasto) return false;
+                if (rangoSeleccionado === 'ultimoCierre' && ultimaHoraCierre && !isNaN(ultimaHoraCierre.getTime())) {
+                    return fechaGasto.getTime() > ultimaHoraCierre.getTime() && esMismaFechaLocal(fechaGasto, hoy);
                 }
-                
                 return esMismaFechaLocal(fechaGasto, hoy);
             } catch (e) {
                 return false;
@@ -6234,6 +6713,22 @@ function mostrarModalCierreDiario() {
                 if (elTar) elTar.textContent = `$ ${(calculos.tarjetaRapidas || 0).toLocaleString()}`;
                 if (elCr) elCr.textContent = `$ ${(calculos.creditoRapidas || 0).toLocaleString()}`;
                 if (elMr) elMr.textContent = `$ ${(calculos.mixtoRapidas || 0).toLocaleString()}`;
+
+                const setBloque = (idBloque, idValor, monto) => {
+                    const bloque = document.getElementById(idBloque);
+                    const valor = document.getElementById(idValor);
+                    if (!bloque || !valor) return;
+                    if ((monto || 0) > 0) {
+                        bloque.style.display = 'block';
+                        valor.textContent = `$ ${monto.toLocaleString()}`;
+                    } else {
+                        bloque.style.display = 'none';
+                    }
+                };
+                setBloque('bloqueRapidaDomicilioCierre', 'totalRapidaDomicilioHoy', calculos.totalRapidaDomicilio || 0);
+                setBloque('bloqueRapidaMesaCierre', 'totalRapidaMesaHoy', calculos.totalRapidaMesa || 0);
+                setBloque('bloqueRapidaRecogerCierre', 'totalRapidaRecogerHoy', calculos.totalRapidaRecoger || 0);
+                setBloque('bloqueRapidaSinCanalCierre', 'totalRapidaSinCanalHoy', calculos.totalRapidaSinCanal || 0);
             } else {
                 sr.style.display = 'none';
             }
@@ -6333,24 +6828,11 @@ function guardarCierreDiario() {
             return;
         }
 
-        // 2. OBTENER VENTAS DESDE ÚLTIMO CIERRE (solo lo del turno del trabajador que entrega)
+        // 2. OBTENER VENTAS DEL DÍA (mismo criterio que el modal: fecha local)
         const todasLasVentas = obtenerTodasLasVentas();
         const hoy = getFechaHoyParaCierre();
-        const ultimaHoraCierreStr = localStorage.getItem('ultimaHoraCierre');
-        const ultimaHoraCierre = ultimaHoraCierreStr ? new Date(ultimaHoraCierreStr) : null;
-        const ventasHoy = todasLasVentas.filter(v => {
-            try {
-                const fechaVenta = new Date(v.fecha);
-                if (ultimaHoraCierre) {
-                    const despuesDeCierre = fechaVenta.getTime() >= ultimaHoraCierre.getTime();
-                    const mismoDia = esMismaFechaLocal(fechaVenta, hoy);
-                    return despuesDeCierre && mismoDia;
-                }
-                return esMismaFechaLocal(fechaVenta, hoy);
-            } catch (e) {
-                return false;
-            }
-        });
+        const rangoSeleccionado = document.querySelector('input[name="rangoVentas"]:checked')?.value || 'todoDia';
+        const ventasHoy = filtrarVentasParaCierre(todasLasVentas, rangoSeleccionado);
 
         // 3. CALCULAR TOTALES CON MIXTO DESGLOSADO (efectivo y transferencia incluyen la parte mixta)
         const calculos = calcularTotalesVentas(ventasHoy);
@@ -6363,9 +6845,15 @@ function guardarCierreDiario() {
         
         // 4. OBTENER GASTOS
         const gastos = JSON.parse(localStorage.getItem('gastos') || '[]');
+        const ultimaHoraCierreStr = localStorage.getItem('ultimaHoraCierre');
+        const ultimaHoraCierre = ultimaHoraCierreStr ? new Date(ultimaHoraCierreStr) : null;
         const gastosHoy = gastos.filter(g => {
             try {
-                const fechaGasto = new Date(g.fecha);
+                const fechaGasto = parseFechaSeguro(g.fecha);
+                if (!fechaGasto) return false;
+                if (rangoSeleccionado === 'ultimoCierre' && ultimaHoraCierre && !isNaN(ultimaHoraCierre.getTime())) {
+                    return fechaGasto.getTime() > ultimaHoraCierre.getTime() && esMismaFechaLocal(fechaGasto, hoy);
+                }
                 return esMismaFechaLocal(fechaGasto, hoy);
             } catch (e) {
                 return false;
@@ -6401,6 +6889,26 @@ function guardarCierreDiario() {
                 credito: totalCredito,
                 mixto: totalMixto
             },
+            ventasRapidas: {
+                total: calculos.totalVentasRapidas,
+                efectivo: calculos.efectivoRapidas,
+                transferencia: calculos.transferenciaRapidas,
+                tarjeta: calculos.tarjetaRapidas,
+                credito: calculos.creditoRapidas,
+                mixto: calculos.mixtoRapidas,
+                domicilio: calculos.totalRapidaDomicilio || 0,
+                mesa: calculos.totalRapidaMesa || 0,
+                recoger: calculos.totalRapidaRecoger || 0,
+                sinCanal: calculos.totalRapidaSinCanal || 0
+            },
+            ventasMesas: {
+                total: calculos.totalVentasMesas,
+                efectivo: calculos.efectivoMesas,
+                transferencia: calculos.transferenciaMesas,
+                tarjeta: calculos.tarjetaMesas,
+                credito: calculos.creditoMesas,
+                mixto: calculos.mixtoMesas
+            },
             totalDomicilios: totalDomiciliosCierre,
             totalesDomiciliarios: totalesDomiciliariosCierre,
             gastos: totalGastos,
@@ -6408,7 +6916,8 @@ function guardarCierreDiario() {
             nombreCierre: nombreCierre,
             nombreRecibe: nombreRecibe,
             montoBaseCaja: montoBaseCaja,
-            detalles: detalles
+            detalles: detalles,
+            rangoVentas: rangoSeleccionado
         };
 
         // 7. GUARDAR EN LOCALSTORAGE
@@ -6599,13 +7108,13 @@ function calcularTotalesVentas(ventas) {
     let totalVentasRapidas = 0, totalVentasMesas = 0;
     let efectivoRapidas = 0, transferenciaRapidas = 0, tarjetaRapidas = 0, creditoRapidas = 0, mixtoRapidas = 0;
     let efectivoMesas = 0, transferenciaMesas = 0, tarjetaMesas = 0, creditoMesas = 0, mixtoMesas = 0;
+    let totalRapidaDomicilio = 0, totalRapidaMesa = 0, totalRapidaRecoger = 0, totalRapidaSinCanal = 0;
 
     // Procesar cada venta individualmente
     ventasUnicas.forEach((venta) => {
         const total = parseFloat(venta.total) || 0;
         const metodo = (venta.metodoPago || '').toLowerCase().trim();
-        // Clasificación robusta: considera venta rápida si el tipo es 'venta_rapida' o si la mesa es 'VENTA DIRECTA'
-        const esVentaRapida = (venta.tipo === 'venta_rapida') || (venta.mesa === 'VENTA DIRECTA');
+        const esVentaRapida = esVentaCajaRapida(venta);
         
         // Sumar al total general
         totalGeneral += total;
@@ -6613,6 +7122,11 @@ function calcularTotalesVentas(ventas) {
         // Clasificar por tipo de venta
         if (esVentaRapida) {
             totalVentasRapidas += total;
+            const canal = obtenerCanalVentaRapida(venta);
+            if (canal === 'domicilio') totalRapidaDomicilio += total;
+            else if (canal === 'mesa') totalRapidaMesa += total;
+            else if (canal === 'recoger') totalRapidaRecoger += total;
+            else totalRapidaSinCanal += total;
         } else {
             totalVentasMesas += total;
         }
@@ -6680,20 +7194,10 @@ function calcularTotalesVentas(ventas) {
         }
     });
 
-    // Verificar coherencia
-    const sumaVentasRapidas = efectivoRapidas + transferenciaRapidas + tarjetaRapidas + creditoRapidas + mixtoRapidas;
-    const sumaVentasMesas = efectivoMesas + transferenciaMesas + tarjetaMesas + creditoMesas + mixtoMesas;
-    const sumaTotal = totalEfectivo + totalTransferencia + totalTarjeta + totalCredito;
-
     console.log(`📊 Total General: $${totalGeneral.toLocaleString()}`);
     console.log(`⚡ Ventas Rápidas: $${totalVentasRapidas.toLocaleString()}`);
     console.log(`🪑 Ventas Mesas: $${totalVentasMesas.toLocaleString()}`);
-    
-    // Verificar coherencia de cálculos
-    const sumaManualFinal = ventasUnicas.reduce((sum, v) => sum + (parseFloat(v.total) || 0), 0);
-    if (sumaManualFinal !== totalGeneral) {
-        console.warn('⚠️ Los totales no coinciden! Diferencia:', Math.abs(sumaManualFinal - totalGeneral));
-    }
+    console.log(`🚚 VR Domicilio: $${totalRapidaDomicilio.toLocaleString()} | Mesa: $${totalRapidaMesa.toLocaleString()} | Recoger: $${totalRapidaRecoger.toLocaleString()}`);
 
     return {
         totalGeneral,
@@ -6713,7 +7217,11 @@ function calcularTotalesVentas(ventas) {
         transferenciaMesas,
         tarjetaMesas,
         creditoMesas,
-        mixtoMesas
+        mixtoMesas,
+        totalRapidaDomicilio,
+        totalRapidaMesa,
+        totalRapidaRecoger,
+        totalRapidaSinCanal
     };
 }
 
@@ -6840,21 +7348,18 @@ function debugVentasDetallado() {
 function obtenerVentasDelDia() {
     const ventas = JSON.parse(localStorage.getItem('ventas') || '[]');
     
-    // Filtrar solo ventas activas de hoy (NO historial)
+    // Filtrar solo ventas activas de hoy (NO historial) — fecha LOCAL
     const hoy = getFechaHoyParaCierre();
-    const hoyStr = hoy.getFullYear() + '-' + String(hoy.getMonth() + 1).padStart(2, '0') + '-' + String(hoy.getDate()).padStart(2, '0');
     
     const ventasHoy = ventas.filter(v => {
         try {
-            const fechaVenta = new Date(v.fecha);
-            const fechaVentaStr = fechaVenta.toISOString().slice(0, 10);
-            return fechaVentaStr === hoyStr;
+            return esMismaFechaLocal(v.fecha, hoy);
         } catch (e) {
             return false;
         }
     });
     
-    console.log(`📅 Filtro aplicado: Solo ventas activas de hoy`);
+    console.log(`📅 Filtro aplicado: Solo ventas activas de hoy (${fechaLocalISO(hoy)})`);
     console.log(`📊 Ventas activas de hoy: ${ventasHoy.length}`);
     
     console.log(`📊 Ventas de hoy: ${ventasHoy.length}`);
@@ -6981,22 +7486,17 @@ function imprimirBalanceDiario(datosCierre = null) {
         console.log('Ventas obtenidas:', todasLasVentas.length);
         
         const hoy = getFechaHoyParaCierre();
-        const hoyStr = hoy.getFullYear() + '-' + String(hoy.getMonth() + 1).padStart(2, '0') + '-' + String(hoy.getDate()).padStart(2, '0');
-        console.log('Fecha de hoy (local):', hoy.toLocaleDateString('es-ES'));
+        console.log('Fecha de hoy (local):', hoy.toLocaleDateString('es-ES'), fechaLocalISO(hoy));
         
-        const ventasHoy = todasLasVentas.filter(v => {
-            const fechaVenta = new Date(v.fecha);
-            if (ultimaHoraCierre) {
-                return fechaVenta > ultimaHoraCierre;
-            }
-            return esMismaFechaLocal(fechaVenta, hoy);
-        });
+        const rangoBalance = (datosCierre && datosCierre.rangoVentas) || 'todoDia';
+        const ventasHoy = filtrarVentasParaCierre(todasLasVentas, rangoBalance);
         console.log('Ventas de hoy filtradas:', ventasHoy.length);
 
         // Usar datos del cierre si están disponibles, sino calcular
         let totalEfectivo, totalTransferencia, totalTarjeta, totalCredito, totalMixto, totalVentas;
         let totalEfectivoRapida, totalTransferenciaRapida, totalTarjetaRapida, totalCreditoRapida, totalMixtoRapida, totalVentasRapidas;
         let totalEfectivoMesa, totalTransferenciaMesa, totalTarjetaMesa, totalCreditoMesa, totalMixtoMesa, totalVentasMesas;
+        let totalRapidaDomicilio = 0, totalRapidaMesa = 0, totalRapidaRecoger = 0, totalRapidaSinCanal = 0;
         
         if (datosCierre && datosCierre.ventas) {
             // Usar datos del cierre
@@ -7015,6 +7515,23 @@ function imprimirBalanceDiario(datosCierre = null) {
                 totalTarjetaRapida = datosCierre.ventasRapidas.tarjeta || 0;
                 totalCreditoRapida = datosCierre.ventasRapidas.credito || 0;
                 totalMixtoRapida = datosCierre.ventasRapidas.mixto || 0;
+                totalRapidaDomicilio = datosCierre.ventasRapidas.domicilio || 0;
+                totalRapidaMesa = datosCierre.ventasRapidas.mesa || 0;
+                totalRapidaRecoger = datosCierre.ventasRapidas.recoger || 0;
+                totalRapidaSinCanal = datosCierre.ventasRapidas.sinCanal || 0;
+            } else {
+                // Fallback: recalcular canales desde ventas del período
+                const calcFallback = calcularTotalesVentas(ventasHoy);
+                totalVentasRapidas = calcFallback.totalVentasRapidas;
+                totalEfectivoRapida = calcFallback.efectivoRapidas;
+                totalTransferenciaRapida = calcFallback.transferenciaRapidas;
+                totalTarjetaRapida = calcFallback.tarjetaRapidas;
+                totalCreditoRapida = calcFallback.creditoRapidas;
+                totalMixtoRapida = calcFallback.mixtoRapidas;
+                totalRapidaDomicilio = calcFallback.totalRapidaDomicilio || 0;
+                totalRapidaMesa = calcFallback.totalRapidaMesa || 0;
+                totalRapidaRecoger = calcFallback.totalRapidaRecoger || 0;
+                totalRapidaSinCanal = calcFallback.totalRapidaSinCanal || 0;
             }
             
             if (datosCierre.ventasMesas) {
@@ -7024,6 +7541,14 @@ function imprimirBalanceDiario(datosCierre = null) {
                 totalTarjetaMesa = datosCierre.ventasMesas.tarjeta || 0;
                 totalCreditoMesa = datosCierre.ventasMesas.credito || 0;
                 totalMixtoMesa = datosCierre.ventasMesas.mixto || 0;
+            } else {
+                const calcMesas = calcularTotalesVentas(ventasHoy);
+                totalVentasMesas = calcMesas.totalVentasMesas;
+                totalEfectivoMesa = calcMesas.efectivoMesas;
+                totalTransferenciaMesa = calcMesas.transferenciaMesas;
+                totalTarjetaMesa = calcMesas.tarjetaMesas;
+                totalCreditoMesa = calcMesas.creditoMesas;
+                totalMixtoMesa = calcMesas.mixtoMesas;
             }
         } else {
             // Si no hay datos de cierre, usar la función mejorada de cálculo
@@ -7046,18 +7571,22 @@ function imprimirBalanceDiario(datosCierre = null) {
             totalTarjetaMesa = calculos.tarjetaMesas;
             totalCreditoMesa = calculos.creditoMesas;
             totalMixtoMesa = calculos.mixtoMesas;
+            totalRapidaDomicilio = calculos.totalRapidaDomicilio || 0;
+            totalRapidaMesa = calculos.totalRapidaMesa || 0;
+            totalRapidaRecoger = calculos.totalRapidaRecoger || 0;
+            totalRapidaSinCanal = calculos.totalRapidaSinCanal || 0;
         }
 
         // Obtener gastos del día
         const gastos = JSON.parse(localStorage.getItem('gastos')) || [];
         console.log('[BALANCE] Fuente de gastos:', gastos);
         const gastosHoy = gastos.filter(g => {
-            const fechaGasto = new Date(g.fecha);
-            if (ultimaHoraCierre) {
-                return fechaGasto > ultimaHoraCierre;
+            const fechaGasto = parseFechaSeguro(g.fecha);
+            if (!fechaGasto) return false;
+            if (rangoBalance === 'ultimoCierre' && ultimaHoraCierre && !isNaN(ultimaHoraCierre.getTime())) {
+                return fechaGasto.getTime() > ultimaHoraCierre.getTime() && esMismaFechaLocal(fechaGasto, hoy);
             }
-            const fechaGastoStr = fechaGasto.toISOString().slice(0, 10);
-            return fechaGastoStr === hoyStr;
+            return esMismaFechaLocal(fechaGasto, hoy);
         });
         const totalGastos = gastosHoy.reduce((sum, g) => sum + (parseFloat(g.monto) || 0), 0);
 
@@ -7194,19 +7723,23 @@ function imprimirBalanceDiario(datosCierre = null) {
                     
                     ${totalVentasRapidas > 0 ? `
                     <div class="border-top">
-                        <div class="mb-1"><strong>Ventas Rápidas</strong></div>
+                        <div class="mb-1"><strong>Ventas Rápidas (caja rápida)</strong></div>
                         <div class="mb-1">Total: $ ${totalVentasRapidas.toLocaleString()}</div>
                         <div class="mb-1">- Efectivo: $ ${(totalEfectivoRapida || 0).toLocaleString()}</div>
                         <div class="mb-1">- Transferencia: $ ${(totalTransferenciaRapida || 0).toLocaleString()}</div>
                         <div class="mb-1">- Tarjeta: $ ${(totalTarjetaRapida || 0).toLocaleString()}</div>
                         <div class="mb-1">- Crédito: $ ${(totalCreditoRapida || 0).toLocaleString()}</div>
                         <div class="mb-1">- Mixto: $ ${(totalMixtoRapida || 0).toLocaleString()}</div>
+                        ${(totalRapidaDomicilio || 0) > 0 ? `<div class="mb-1">Domicilios (caja rápida): $ ${totalRapidaDomicilio.toLocaleString()}</div>` : ''}
+                        ${(totalRapidaMesa || 0) > 0 ? `<div class="mb-1">Mesa / Aquí (caja rápida): $ ${totalRapidaMesa.toLocaleString()}</div>` : ''}
+                        ${(totalRapidaRecoger || 0) > 0 ? `<div class="mb-1">Recoger (caja rápida): $ ${totalRapidaRecoger.toLocaleString()}</div>` : ''}
+                        ${(totalRapidaSinCanal || 0) > 0 ? `<div class="mb-1">Sin clasificar: $ ${totalRapidaSinCanal.toLocaleString()}</div>` : ''}
                     </div>
                     ` : ''}
                     
                     ${totalVentasMesas > 0 ? `
                     <div class="border-top">
-                        <div class="mb-1"><strong>Ventas de Mesas</strong></div>
+                        <div class="mb-1"><strong>Ventas de Mesas (flujo normal)</strong></div>
                         <div class="mb-1">Total: $ ${totalVentasMesas.toLocaleString()}</div>
                         <div class="mb-1">- Efectivo: $ ${(totalEfectivoMesa || 0).toLocaleString()}</div>
                         <div class="mb-1">- Transferencia: $ ${(totalTransferenciaMesa || 0).toLocaleString()}</div>
@@ -7607,7 +8140,7 @@ function imprimirBalanceDiarioMejorado(cierre) {
 
         <div class="totals-grid">
             <div class="total-section rapidas">
-                <div class="total-title rapidas">⚡ Ventas Rápidas</div>
+                <div class="total-title rapidas">⚡ Ventas Rápidas (caja rápida)</div>
                 <div class="total-item">
                     <span>💵 Efectivo:</span>
                     <span>$${ventasRapidas.efectivo.toLocaleString()}</span>
@@ -7628,6 +8161,26 @@ function imprimirBalanceDiarioMejorado(cierre) {
                     <span>🔄 Mixto:</span>
                     <span>$${ventasRapidas.mixto.toLocaleString()}</span>
                 </div>
+                ${(ventasRapidas.domicilio || 0) > 0 ? `
+                <div class="total-item">
+                    <span>🚚 Domicilios (caja rápida):</span>
+                    <span>$${ventasRapidas.domicilio.toLocaleString()}</span>
+                </div>` : ''}
+                ${(ventasRapidas.mesa || 0) > 0 ? `
+                <div class="total-item">
+                    <span>🍽️ Mesa / Aquí (caja rápida):</span>
+                    <span>$${ventasRapidas.mesa.toLocaleString()}</span>
+                </div>` : ''}
+                ${(ventasRapidas.recoger || 0) > 0 ? `
+                <div class="total-item">
+                    <span>🛍️ Recoger (caja rápida):</span>
+                    <span>$${ventasRapidas.recoger.toLocaleString()}</span>
+                </div>` : ''}
+                ${(ventasRapidas.sinCanal || 0) > 0 ? `
+                <div class="total-item">
+                    <span>Sin clasificar:</span>
+                    <span>$${ventasRapidas.sinCanal.toLocaleString()}</span>
+                </div>` : ''}
                 <div class="total-item">
                     <span>📊 TOTAL RÁPIDAS:</span>
                     <span>$${ventasRapidas.total.toLocaleString()}</span>
@@ -7635,7 +8188,7 @@ function imprimirBalanceDiarioMejorado(cierre) {
             </div>
 
             <div class="total-section mesas">
-                <div class="total-title mesas">🪑 Ventas de Mesas</div>
+                <div class="total-title mesas">🪑 Ventas de Mesas (flujo normal)</div>
                 <div class="total-item">
                     <span>💵 Efectivo:</span>
                     <span>$${ventasMesas.efectivo.toLocaleString()}</span>

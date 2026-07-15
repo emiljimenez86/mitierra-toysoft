@@ -1105,17 +1105,20 @@ function mostrarModalCierreDiario() {
 
         // Obtener todas las ventas (normales + rápidas)
         const todasLasVentas = obtenerTodasLasVentas();
-        const hoy = new Date();
-        const hoyStr = hoy.toISOString().slice(0, 10);
-        
-        const ventasHoy = todasLasVentas.filter(v => {
-            const fechaVenta = new Date(v.fecha);
-            if (ultimaHoraCierre) {
-                return fechaVenta > ultimaHoraCierre;
-            }
-            const fechaVentaStr = fechaVenta.toISOString().slice(0, 10);
-            return fechaVentaStr === hoyStr;
-        });
+        // Usar fecha LOCAL (en Colombia toISOString salta de día a las 7pm)
+        const ventasHoy = (typeof filtrarVentasParaCierre === 'function')
+            ? filtrarVentasParaCierre(todasLasVentas, 'todoDia')
+            : (() => {
+                const hoy = new Date();
+                return todasLasVentas.filter(v => {
+                    try {
+                        const fv = new Date(v.fecha);
+                        return fv.getFullYear() === hoy.getFullYear()
+                            && fv.getMonth() === hoy.getMonth()
+                            && fv.getDate() === hoy.getDate();
+                    } catch (e) { return false; }
+                });
+            })();
 
         // Calcular totales
         let totalEfectivo = 0, totalTransferencia = 0, totalTarjeta = 0, totalCredito = 0, totalMixto = 0, totalVentas = 0;
@@ -1140,6 +1143,7 @@ function mostrarModalCierreDiario() {
                         totalTarjeta += total;
                         break;
                     case 'crédito':
+                    case 'credito':
                         totalCredito += total;
                         break;
                 }
@@ -1150,12 +1154,18 @@ function mostrarModalCierreDiario() {
         // Obtener gastos del día
         const gastos = JSON.parse(localStorage.getItem('gastos')) || [];
         const gastosHoy = gastos.filter(g => {
-            const fechaGasto = new Date(g.fecha);
-            if (ultimaHoraCierre) {
-                return fechaGasto > ultimaHoraCierre;
+            try {
+                if (typeof esMismaFechaLocal === 'function') {
+                    return esMismaFechaLocal(g.fecha, typeof getFechaHoyParaCierre === 'function' ? getFechaHoyParaCierre() : new Date());
+                }
+                const fechaGasto = new Date(g.fecha);
+                const hoy = new Date();
+                return fechaGasto.getFullYear() === hoy.getFullYear()
+                    && fechaGasto.getMonth() === hoy.getMonth()
+                    && fechaGasto.getDate() === hoy.getDate();
+            } catch (e) {
+                return false;
             }
-            const fechaGastoStr = fechaGasto.toISOString().slice(0, 10);
-            return fechaGastoStr === hoyStr;
         });
         const totalGastos = gastosHoy.reduce((sum, g) => sum + (parseFloat(g.monto) || 0), 0);
 
@@ -1260,19 +1270,21 @@ function guardarCierreDiario() {
         // Obtener todas las ventas (normales + rápidas) y gastos del día
         const todasLasVentas = obtenerTodasLasVentas();
         const gastos = JSON.parse(localStorage.getItem('gastos')) || [];
-        const hoy = new Date();
-        const hoyStr = hoy.toISOString().slice(0, 10);
-
-        const ventasHoy = todasLasVentas.filter(v => {
-            const fechaVenta = new Date(v.fecha);
-            const fechaVentaStr = fechaVenta.toISOString().slice(0, 10);
-            return fechaVentaStr === hoyStr;
-        });
+        const ventasHoy = (typeof filtrarVentasParaCierre === 'function')
+            ? filtrarVentasParaCierre(todasLasVentas, 'todoDia')
+            : todasLasVentas.filter(v => {
+                const fv = new Date(v.fecha);
+                const hoy = new Date();
+                return fv.getFullYear() === hoy.getFullYear() && fv.getMonth() === hoy.getMonth() && fv.getDate() === hoy.getDate();
+            });
 
         const gastosHoy = gastos.filter(g => {
-            const fechaGasto = new Date(g.fecha);
-            const fechaGastoStr = fechaGasto.toISOString().slice(0, 10);
-            return fechaGastoStr === hoyStr;
+            if (typeof esMismaFechaLocal === 'function') {
+                return esMismaFechaLocal(g.fecha, typeof getFechaHoyParaCierre === 'function' ? getFechaHoyParaCierre() : new Date());
+            }
+            const fg = new Date(g.fecha);
+            const hoy = new Date();
+            return fg.getFullYear() === hoy.getFullYear() && fg.getMonth() === hoy.getMonth() && fg.getDate() === hoy.getDate();
         });
 
         // Calcular totales
