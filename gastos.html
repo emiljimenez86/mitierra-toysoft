@@ -131,10 +131,11 @@
             </div>
         </div>
 
-        <!-- Formulario para agregar gasto (inicialmente oculto) -->
+        <!-- Formulario para agregar/editar gasto (inicialmente oculto) -->
         <div id="formGasto" class="card bg-dark border-light mb-4" style="display: none;">
             <div class="card-body">
-                <h5 class="card-title"><i class="fas fa-edit me-2"></i>Nuevo Gasto</h5>
+                <h5 class="card-title" id="tituloFormGasto"><i class="fas fa-edit me-2"></i>Nuevo Gasto</h5>
+                <input type="hidden" id="gastoEditandoId" value="">
                 <div class="row g-3">
                     <div class="col-md-4">
                         <label class="form-label">Descripción</label>
@@ -144,7 +145,7 @@
                         <label class="form-label">Monto</label>
                         <div class="input-group">
                             <span class="input-group-text">$</span>
-                            <input type="number" id="montoGasto" class="form-control" placeholder="0.00">
+                            <input type="number" id="montoGasto" class="form-control" placeholder="0.00" min="0" step="100">
                         </div>
                     </div>
                     <div class="col-md-3">
@@ -159,9 +160,12 @@
                             <option value="otros">Otros</option>
                         </select>
                     </div>
-                    <div class="col-md-2 d-flex align-items-end">
-                        <button class="btn btn-primary w-100" onclick="guardarGasto()">
-                            <i class="fas fa-save me-2"></i>Guardar
+                    <div class="col-md-2 d-flex align-items-end gap-2">
+                        <button type="button" class="btn btn-primary flex-grow-1" id="btnGuardarGasto" onclick="guardarGasto()">
+                            <i class="fas fa-save me-1"></i>Guardar
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary" onclick="cancelarFormGasto()" title="Cancelar">
+                            <i class="fas fa-times"></i>
                         </button>
                     </div>
                 </div>

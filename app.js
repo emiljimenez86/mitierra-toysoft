@@ -404,7 +404,7 @@ function reiniciarSistemaCompleto() {
         });
         localStorage.setItem('domicilios', JSON.stringify(domiciliosFiltrados));
         
-        // 3. Limpiar gastos del día actual
+        // 3. Limpiar gastos del día actual (fecha LOCAL; también limpia historial operativo del día)
         console.log('💰 Limpiando gastos del día...');
         const gastos = JSON.parse(localStorage.getItem('gastos') || '[]');
         const gastosFiltrados = gastos.filter(gasto => {
@@ -416,6 +416,10 @@ function reiniciarSistemaCompleto() {
             }
         });
         localStorage.setItem('gastos', JSON.stringify(gastosFiltrados));
+
+        // historialGastos se conserva para reportes/balance por fecha,
+        // pero los del día cerrado ya no deben contarse en el turno operativo:
+        // no se borran del historial; el corte lo marca ultimaHoraCierre.
         
         // 4. Reiniciar estado de mesas
         console.log('🪑 Reiniciando estado de mesas...');
@@ -12434,11 +12438,9 @@ console.log('[BALANCE] Fuente de gastos: historialGastos', gastos);
     setInterval(crearRecordatorioCierreAutomatico, 600000); // Cada 10 minutos
 })();
 
-// Utilidad para obtener solo la fecha en formato YYYY-MM-DD
+// Utilidad para obtener solo la fecha en formato YYYY-MM-DD (zona LOCAL)
 function soloFechaISO(fecha) {
-    if (!fecha) return '';
-    const d = new Date(fecha);
-    return d.toISOString().split('T')[0];
+    return fechaLocalISO(fecha);
 }
 
 // Función para mostrar el modal "Acerca de"
