@@ -1365,9 +1365,14 @@ function guardarCierreDiario() {
             // Registrar hora de cierre para futuras consultas
             localStorage.setItem('ultimaHoraCierre', new Date().toISOString());
 
-            // Reiniciar contadores
-            localStorage.setItem('contadorDelivery', '0');
+            // Reiniciar contadores (clave correcta: contadorDomicilios, no contadorDelivery)
+            localStorage.setItem('contadorDomicilios', '0');
             localStorage.setItem('contadorRecoger', '0');
+            localStorage.setItem('ultimaFechaContadores', new Date().toLocaleDateString());
+            localStorage.removeItem('contadorDelivery');
+            if (typeof window.contadorDomicilios !== 'undefined') window.contadorDomicilios = 0;
+            if (typeof window.contadorRecoger !== 'undefined') window.contadorRecoger = 0;
+            if (typeof reiniciarContadoresDomRec === 'function') reiniciarContadoresDomRec();
             
             // Limpiar mesas activas
             localStorage.setItem('mesasActivas', JSON.stringify([]));
@@ -2193,8 +2198,11 @@ Esta acción eliminará:
             localStorage.removeItem('gastos');
             
             // Limpiar contadores
-            localStorage.setItem('contadorDelivery', '0');
+            localStorage.setItem('contadorDomicilios', '0');
             localStorage.setItem('contadorRecoger', '0');
+            localStorage.setItem('ultimaFechaContadores', new Date().toLocaleDateString());
+            localStorage.removeItem('contadorDelivery');
+            if (typeof reiniciarContadoresDomRec === 'function') reiniciarContadoresDomRec();
             
             // Limpiar mesas activas
             localStorage.setItem('mesasActivas', JSON.stringify([]));

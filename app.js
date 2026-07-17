@@ -370,10 +370,8 @@ function reiniciarSistemaCompleto() {
         // Marcar hora de cierre para que los siguientes cálculos ignoren ventas previas
         localStorage.setItem('ultimaHoraCierre', new Date().toISOString());
         
-        // Reiniciar contadores de DOM/REC en almacenamiento para próximo turno
-        localStorage.setItem('contadorDomicilios', '0');
-        localStorage.setItem('contadorRecoger', '0');
-        localStorage.setItem('ultimaFechaContadores', new Date().toLocaleDateString());
+        // Reiniciar contadores de DOM/REC (memoria + almacenamiento) → próximo D1 / R1
+        reiniciarContadoresDomRec();
         
         // 1. Limpiar ventas del día actual
         console.log('🧹 Limpiando ventas del día...');
@@ -1092,9 +1090,24 @@ function guardarClientes() {
 
 // Función para guardar contadores en localStorage
 function guardarContadores() {
-  localStorage.setItem('contadorDomicilios', contadorDomicilios.toString());
-  localStorage.setItem('contadorRecoger', contadorRecoger.toString());
+  localStorage.setItem('contadorDomicilios', String(contadorDomicilios || 0));
+  localStorage.setItem('contadorRecoger', String(contadorRecoger || 0));
+  if (ultimaFechaContadores) {
+    localStorage.setItem('ultimaFechaContadores', ultimaFechaContadores);
+  }
+}
+
+// Reinicia DOM/REC a 0 en memoria y localStorage (próximo pedido = D1 / R1)
+function reiniciarContadoresDomRec() {
+  contadorDomicilios = 0;
+  contadorRecoger = 0;
+  ultimaFechaContadores = new Date().toLocaleDateString();
+  localStorage.setItem('contadorDomicilios', '0');
+  localStorage.setItem('contadorRecoger', '0');
   localStorage.setItem('ultimaFechaContadores', ultimaFechaContadores);
+  // Limpiar clave antigua errónea (admon usaba "contadorDelivery")
+  localStorage.removeItem('contadorDelivery');
+  console.log('🔁 Contadores DOM/REC reiniciados → próximo D1 / R1');
 }
 
 // Función para guardar historial de ventas
@@ -2408,8 +2421,6 @@ function cargarDatos() {
     const categoriasGuardadas = localStorage.getItem('categorias');
     const ordenesCocinaGuardadas = localStorage.getItem('ordenesCocina');
     const clientesGuardados = localStorage.getItem('clientes');
-    const contadorDomiciliosGuardado = localStorage.getItem('contadorDomicilios');
-    const contadorRecogerGuardado = localStorage.getItem('contadorRecoger');
     const historialCocinaGuardado = localStorage.getItem('historialCocina');
     const cotizacionesGuardadas = localStorage.getItem('cotizaciones');
     
@@ -2479,13 +2490,17 @@ function cargarDatos() {
       }
     }
 
-    if (contadorDomiciliosGuardado) {
-      contadorDomicilios = parseInt(contadorDomiciliosGuardado);
+    // Cargar contadores (incluir "0": no usar if (valor) porque '0' es falsy)
+    const contadorDomiciliosGuardado = localStorage.getItem('contadorDomicilios');
+    const contadorRecogerGuardado = localStorage.getItem('contadorRecoger');
+    if (contadorDomiciliosGuardado !== null && contadorDomiciliosGuardado !== '') {
+      contadorDomicilios = parseInt(contadorDomiciliosGuardado, 10) || 0;
     }
-
-    if (contadorRecogerGuardado) {
-      contadorRecoger = parseInt(contadorRecogerGuardado);
+    if (contadorRecogerGuardado !== null && contadorRecogerGuardado !== '') {
+      contadorRecoger = parseInt(contadorRecogerGuardado, 10) || 0;
     }
+    ultimaFechaContadores = localStorage.getItem('ultimaFechaContadores') || ultimaFechaContadores;
+    console.log(`📦 Contadores cargados: DOM=${contadorDomicilios}, REC=${contadorRecoger}`);
 
     if (historialCocinaGuardado) {
       try {
@@ -6383,9 +6398,7 @@ function crearPedidoRecogerConCliente(cliente) {
 
 // Función para reiniciar contadores (puedes llamarla al inicio del día)
 function reiniciarContadores() {
-  contadorDomicilios = 0;
-  contadorRecoger = 0;
-  guardarContadores();
+  reiniciarContadoresDomRec();
 }
 
 // Modificar las funciones existentes de crear pedido
@@ -7351,12 +7364,9 @@ function guardarCierreDiario() {
         
         if (reinicioExitoso) {
             console.log('✅ Sistema reiniciado correctamente');
-            // Forzar contadores DOM/REC a cero y persistir
+            // Asegurar de nuevo DOM/REC en 0 (por si algo intermedio los reescribió)
             try {
-                contadorDomicilios = 0;
-                contadorRecoger = 0;
-                ultimaFechaContadores = new Date().toLocaleDateString();
-                if (typeof guardarContadores === 'function') guardarContadores();
+                reiniciarContadoresDomRec();
             } catch (e) {
                 console.error('Error al guardar contadores tras reinicio:', e);
             }
@@ -7367,13 +7377,19 @@ function guardarCierreDiario() {
                     if (typeof cargarDatos === 'function') {
                         cargarDatos();
                     }
+                    // Volver a forzar contadores tras cargarDatos
+                    reiniciarContadoresDomRec();
                     // Actualizar vista de mesas
                     if (typeof actualizarVistaMesas === 'function') {
                         actualizarVistaMesas();
                     }
+                    if (typeof actualizarMesasActivas === 'function') {
+                        actualizarMesasActivas();
+                    }
                     // Limpiar interfaz de ventas
                     limpiarInterfazVentas();
                     console.log('✅ Interfaz actualizada después del reinicio');
+                    console.log(`🔁 Próximos pedidos: D${(contadorDomicilios || 0) + 1} / R${(contadorRecoger || 0) + 1}`);
                     // Verificar estado del sistema
                     debugEstadoSistema();
                 } catch (e) {
@@ -7382,6 +7398,8 @@ function guardarCierreDiario() {
             }, 500);
         } else {
             console.error('❌ Error al reiniciar sistema');
+            // Aunque falle el reinicio general, al menos resetear DOM/REC
+            try { reiniciarContadoresDomRec(); } catch (e) { /* ignore */ }
         }
 
         // 10. CERRAR MODAL
@@ -7801,8 +7819,8 @@ function reiniciarSistemaDespuesCierre() {
     }
     
     // Reiniciar contadores específicos y globales
-    localStorage.setItem('ultimaHoraCierre', new Date().toISOString());
-    // Reiniciar contadores en memoria
+    reiniciarContadoresDomRec();
+    // Reiniciar contadores en memoria (redundante, ya lo hace reiniciarContadoresDomRec)
     if (typeof contadorDomicilios !== 'undefined') contadorDomicilios = 0;
     if (typeof contadorRecoger !== 'undefined') contadorRecoger = 0;
     if (typeof ultimaFechaContadores !== 'undefined') ultimaFechaContadores = new Date().toLocaleDateString();
@@ -7810,6 +7828,7 @@ function reiniciarSistemaDespuesCierre() {
     try {
         if (typeof guardarContadores === 'function') guardarContadores();
         if (typeof cargarDatos === 'function') cargarDatos();
+        reiniciarContadoresDomRec();
     } catch (e) {
         console.error('Error al refrescar datos:', e);
     }
@@ -9833,17 +9852,16 @@ function verificarContadoresDiarios() {
   
   // Si no hay fecha guardada o es un nuevo día, reiniciar contadores
   if (!ultimaFechaContadores || ultimaFechaContadores !== fechaActual) {
-    contadorDomicilios = 0;
-    contadorRecoger = 0;
-    ultimaFechaContadores = fechaActual;
-    guardarContadores();
+    reiniciarContadoresDomRec();
   }
 }
 
 // Función para cargar contadores desde localStorage
 function cargarContadores() {
-  contadorDomicilios = parseInt(localStorage.getItem('contadorDomicilios')) || 0;
-  contadorRecoger = parseInt(localStorage.getItem('contadorRecoger')) || 0;
+  const dom = localStorage.getItem('contadorDomicilios');
+  const rec = localStorage.getItem('contadorRecoger');
+  contadorDomicilios = (dom !== null && dom !== '') ? (parseInt(dom, 10) || 0) : 0;
+  contadorRecoger = (rec !== null && rec !== '') ? (parseInt(rec, 10) || 0) : 0;
   ultimaFechaContadores = localStorage.getItem('ultimaFechaContadores');
   verificarContadoresDiarios();
 }
@@ -12471,6 +12489,9 @@ window.mostrarVistaPreviaRecibo = mostrarVistaPreviaRecibo;
 
 // Funciones del sistema
 window.reiniciarSistema = reiniciarSistema;
+window.reiniciarContadores = reiniciarContadores;
+window.reiniciarContadoresDomRec = reiniciarContadoresDomRec;
+window.guardarContadores = guardarContadores;
 
 // Función para limpiar completamente el localStorage (útil para desarrollo y pruebas)
 function limpiarLocalStorageCompleto() {
